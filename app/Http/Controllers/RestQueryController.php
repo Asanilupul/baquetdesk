@@ -11,6 +11,38 @@ use Throwable;
 
 class RestQueryController extends Controller
 {
+    /** @var array<string, list<string>> */
+    private static array $columnCache = [];
+
+    /** @var array<string, array{column: string, ascending: bool}> */
+    private array $bootstrapOrder = [
+        'employees' => ['column' => 'name', 'ascending' => true],
+        'functions' => ['column' => 'function_date', 'ascending' => false],
+        'walking_inquiries' => ['column' => 'inquiry_date', 'ascending' => false],
+        'quotations' => ['column' => 'created_at', 'ascending' => false],
+        'suppliers' => ['column' => 'name', 'ascending' => true],
+        'supplier_products' => ['column' => 'product_name', 'ascending' => true],
+        'purchase_orders' => ['column' => 'created_at', 'ascending' => false],
+        'supplier_payments' => ['column' => 'payment_date', 'ascending' => false],
+        'menu_categories' => ['column' => 'name', 'ascending' => true],
+        'menu_items' => ['column' => 'name', 'ascending' => true],
+        'menus' => ['column' => 'name', 'ascending' => true],
+        'menu_addons' => ['column' => 'name', 'ascending' => true],
+        'kitchen_sheets' => ['column' => 'created_at', 'ascending' => false],
+        'store_items' => ['column' => 'name', 'ascending' => true],
+        'store_transactions' => ['column' => 'created_at', 'ascending' => false],
+        'vendors' => ['column' => 'vendor_name', 'ascending' => true],
+        'vendor_categories' => ['column' => 'name', 'ascending' => true],
+        'vendor_packages' => ['column' => 'name', 'ascending' => true],
+        'accounts_coa' => ['column' => 'account_code', 'ascending' => true],
+        'journal_entries' => ['column' => 'entry_date', 'ascending' => false],
+        'expense_entries' => ['column' => 'expense_date', 'ascending' => false],
+        'invoices' => ['column' => 'created_at', 'ascending' => false],
+        'halls' => ['column' => 'name', 'ascending' => true],
+        'menu_extras' => ['column' => 'name', 'ascending' => true],
+        'combo_packages' => ['column' => 'name', 'ascending' => true],
+    ];
+
     /** @var list<string> */
     private array $allowedTables = [
         'users', 'employees', 'stewards', 'attendance', 'advance_requests', 'payments',
@@ -19,8 +51,8 @@ class RestQueryController extends Controller
         'menu_items', 'menus', 'menu_hall_prices', 'menu_category_configs', 'menu_selections',
         'function_menu_selections', 'menu_addons', 'function_menu_addons', 'function_menu_extras', 'kitchen_sheets',
         'store_items', 'item_recipes', 'store_transactions', 'vendors', 'vendor_categories',
-        'vendor_packages', 'accounts_coa', 'journal_entries', 'function_sheets',
-        'system_settings', 'production_balancing', 'halls', 'menu_extras', 'combo_packages',
+        'vendor_packages', 'accounts_coa', 'journal_entries', 'expense_entries', 'function_sheets',
+        'system_settings', 'production_balancing', 'halls', 'menu_extras', 'combo_packages', 'companies',
     ];
 
     /** @var array<string, list<string>> */
@@ -41,19 +73,21 @@ class RestQueryController extends Controller
         'stewards' => ['isPaid'],
         'advance_requests' => ['is_paid', 'is_reconciled'],
         'payments' => ['is_reconciled', 'is_refunded'],
+        'accounts_coa' => ['is_active'],
     ];
 
     public function handle(Request $request): JsonResponse
     {
         try {
             $table = (string) $request->input('table', '');
-            if (! in_array($table, $this->allowedTables, true) || ! Schema::hasTable($table)) {
+            if (! in_array($table, $this->allowedTables, true)) {
                 return response()->json([
                     'data' => null,
                     'error' => ['message' => "Unknown or disallowed table: {$table}"],
                 ], 400);
             }
 
+            $companyId = $this->resolveCompanyId($request);
             $action = (string) $request->input('action', 'select');
             $filters = $request->input('filters', []);
             $order = $request->input('order');
@@ -65,12 +99,17 @@ class RestQueryController extends Controller
             $onConflict = $request->input('onConflict');
             $returnRows = (bool) $request->input('returnRows', false);
 
+            // Login lookups must remain unscoped
+            $skipCompanyScope = in_array($table, ['users', 'vendors', 'companies'], true)
+                && in_array($action, ['select'], true)
+                && $companyId === '';
+
             $result = match ($action) {
-                'select' => $this->runSelect($table, $select, $filters, $order, $limit, $single, $maybeSingle),
-                'insert' => $this->runInsert($table, $payload, $returnRows || $single || $maybeSingle, $single, $maybeSingle),
-                'update' => $this->runUpdate($table, $payload, $filters, $returnRows || $single || $maybeSingle, $single, $maybeSingle),
-                'delete' => $this->runDelete($table, $filters),
-                'upsert' => $this->runUpsert($table, $payload, $onConflict, $returnRows || $single || $maybeSingle, $single, $maybeSingle),
+                'select' => $this->runSelect($table, $select, $filters, $order, $limit, $single, $maybeSingle, $skipCompanyScope ? '' : $companyId),
+                'insert' => $this->runInsert($table, $payload, $returnRows || $single || $maybeSingle, $single, $maybeSingle, $companyId),
+                'update' => $this->runUpdate($table, $payload, $filters, $returnRows || $single || $maybeSingle, $single, $maybeSingle, $companyId),
+                'delete' => $this->runDelete($table, $filters, $companyId),
+                'upsert' => $this->runUpsert($table, $payload, $onConflict, $returnRows || $single || $maybeSingle, $single, $maybeSingle, $companyId),
                 default => throw new \InvalidArgumentException("Unsupported action: {$action}"),
             };
 
@@ -90,6 +129,123 @@ class RestQueryController extends Controller
         }
     }
 
+    public function bootstrap(Request $request): JsonResponse
+    {
+        try {
+            $started = microtime(true);
+            $attendanceStart = (string) $request->input('attendance_start', '');
+            $attendanceEnd = (string) $request->input('attendance_end', '');
+            $companyId = $this->resolveCompanyId($request);
+
+            $payload = [];
+            foreach ($this->allowedTables as $table) {
+                if ($table === 'attendance' || $table === 'system_settings') {
+                    continue;
+                }
+
+                try {
+                    $query = DB::table($table);
+                    $this->applyCompanyScope($query, $table, $companyId);
+                    $order = $this->bootstrapOrder[$table] ?? null;
+                    if ($order) {
+                        $query->orderBy($order['column'], $order['ascending'] ? 'asc' : 'desc');
+                    }
+                    $payload[$table] = $query->get()
+                        ->map(fn ($row) => $this->decodeRow($table, (array) $row))
+                        ->all();
+                } catch (Throwable $e) {
+                    $payload[$table] = [];
+                }
+            }
+
+            // Branding: prefer companies table, fall back to system_settings
+            $settings = [];
+            if ($companyId !== '' && Schema::hasTable('companies')) {
+                $company = DB::table('companies')->where('id', $companyId)->first();
+                if ($company) {
+                    $map = [
+                        'company_name' => $company->name ?? '',
+                        'company_subtitle' => $company->subtitle ?? '',
+                        'company_phone' => $company->phone ?? '',
+                        'company_email' => $company->email ?? '',
+                        'company_address' => $company->address ?? '',
+                        'company_logo' => $company->logo ?? '',
+                    ];
+                    foreach ($map as $key => $value) {
+                        $settings[] = ['key' => $key, 'value' => (string) $value];
+                    }
+                }
+            }
+            if (! $settings) {
+                $settings = DB::table('system_settings')->get()
+                    ->map(function ($row) {
+                        $arr = (array) $row;
+                        if (($arr['key'] ?? '') === 'company_logo') {
+                            $arr['value'] = '';
+                            $arr['deferred'] = true;
+                        }
+
+                        return $this->decodeRow('system_settings', $arr);
+                    })
+                    ->all();
+            }
+            $payload['system_settings'] = $settings;
+            $payload['companies'] = $companyId !== '' && Schema::hasTable('companies')
+                ? DB::table('companies')->where('id', $companyId)->get()->map(fn ($r) => (array) $r)->all()
+                : [];
+
+            $attendanceQuery = DB::table('attendance');
+            $this->applyCompanyScope($attendanceQuery, 'attendance', $companyId);
+            if ($attendanceStart !== '' && $attendanceEnd !== '') {
+                $attendanceQuery->where('date', '>=', $attendanceStart)->where('date', '<=', $attendanceEnd);
+            }
+            $payload['attendance'] = $attendanceQuery
+                ->limit(10000)
+                ->get()
+                ->map(fn ($row) => $this->decodeRow('attendance', (array) $row))
+                ->all();
+
+            return response()->json([
+                'data' => $payload,
+                'error' => null,
+                'meta' => [
+                    'ms' => (int) round((microtime(true) - $started) * 1000),
+                    'tables' => count($payload),
+                    'company_id' => $companyId,
+                ],
+            ]);
+        } catch (Throwable $e) {
+            return response()->json([
+                'data' => null,
+                'error' => ['message' => $e->getMessage()],
+            ], 500);
+        }
+    }
+
+    private function resolveCompanyId(Request $request): string
+    {
+        $id = trim((string) ($request->header('X-Company-Id') ?: $request->input('company_id', '')));
+
+        return $id;
+    }
+
+    private function applyCompanyScope($query, string $table, string $companyId): void
+    {
+        if ($companyId === '' || $table === 'system_settings' || $table === 'companies') {
+            return;
+        }
+        if (! Schema::hasColumn($table, 'company_id')) {
+            return;
+        }
+        $query->where('company_id', $companyId);
+    }
+
+    /** @return list<string> */
+    private function columnsFor(string $table): array
+    {
+        return self::$columnCache[$table] ??= Schema::getColumnListing($table);
+    }
+
     private function runSelect(
         string $table,
         mixed $select,
@@ -97,9 +253,11 @@ class RestQueryController extends Controller
         mixed $order,
         mixed $limit,
         bool $single,
-        bool $maybeSingle
+        bool $maybeSingle,
+        string $companyId = ''
     ): mixed {
         $query = DB::table($table);
+        $this->applyCompanyScope($query, $table, $companyId);
         $this->applyFilters($query, $filters);
 
         if (is_string($select) && $select !== '*') {
@@ -125,12 +283,16 @@ class RestQueryController extends Controller
         mixed $payload,
         bool $returnRows,
         bool $single,
-        bool $maybeSingle
+        bool $maybeSingle,
+        string $companyId = ''
     ): mixed {
         $rows = $this->normalizeRows($payload);
         $prepared = [];
 
         foreach ($rows as $row) {
+            if ($companyId !== '' && Schema::hasColumn($table, 'company_id') && empty($row['company_id'])) {
+                $row['company_id'] = $companyId;
+            }
             $prepared[] = $this->prepareWriteRow($table, $row, true);
         }
 
@@ -151,13 +313,15 @@ class RestQueryController extends Controller
         mixed $filters,
         bool $returnRows,
         bool $single,
-        bool $maybeSingle
+        bool $maybeSingle,
+        string $companyId = ''
     ): mixed {
         if (! is_array($payload)) {
             throw new \InvalidArgumentException('Update payload must be an object');
         }
 
         $query = DB::table($table);
+        $this->applyCompanyScope($query, $table, $companyId);
         $this->applyFilters($query, $filters);
 
         $update = $this->prepareWriteRow($table, $payload, false);
@@ -176,15 +340,17 @@ class RestQueryController extends Controller
         }
 
         $rows = DB::table($table);
+        $this->applyCompanyScope($rows, $table, $companyId);
         $this->applyFilters($rows, $filters);
         $decoded = $rows->get()->map(fn ($row) => $this->decodeRow($table, (array) $row))->all();
 
         return $this->shapeResult($decoded, $single, $maybeSingle);
     }
 
-    private function runDelete(string $table, mixed $filters): mixed
+    private function runDelete(string $table, mixed $filters, string $companyId = ''): mixed
     {
         $query = DB::table($table);
+        $this->applyCompanyScope($query, $table, $companyId);
         $this->applyFilters($query, $filters);
         $query->delete();
 
@@ -197,13 +363,17 @@ class RestQueryController extends Controller
         mixed $onConflict,
         bool $returnRows,
         bool $single,
-        bool $maybeSingle
+        bool $maybeSingle,
+        string $companyId = ''
     ): mixed {
         $rows = $this->normalizeRows($payload);
         $conflictCols = array_values(array_filter(array_map('trim', explode(',', (string) ($onConflict ?: 'id')))));
         $saved = [];
 
         foreach ($rows as $row) {
+            if ($companyId !== '' && Schema::hasColumn($table, 'company_id') && empty($row['company_id'])) {
+                $row['company_id'] = $companyId;
+            }
             $prepared = $this->prepareWriteRow($table, $row, true);
             $match = [];
 
@@ -300,7 +470,7 @@ class RestQueryController extends Controller
     /** @param array<string, mixed> $row */
     private function prepareWriteRow(string $table, array $row, bool $isInsert): array
     {
-        $columns = Schema::getColumnListing($table);
+        $columns = $this->columnsFor($table);
         $out = [];
 
         foreach ($row as $key => $value) {
