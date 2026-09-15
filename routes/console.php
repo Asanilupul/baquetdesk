@@ -10,3 +10,6 @@ Artisan::command('inspire', function () {
 
 // Daily automatic backup for cPanel / server (requires cron: php artisan schedule:run)
 Schedule::command('backup:daily')->dailyAt('02:00')->withoutOverlapping();
+
+// Payment reminder when subscription ends within 7 days
+Schedule::command('subscriptions:remind')->dailyAt('09:00')->withoutOverlapping();

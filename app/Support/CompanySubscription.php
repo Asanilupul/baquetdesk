@@ -39,6 +39,12 @@ class CompanySubscription
             return false;
         }
 
+        // Account-level deactivate switch
+        $accountStatus = strtolower((string) ($company->status ?? 'Active'));
+        if (in_array($accountStatus, ['inactive', 'disabled', 'deactivated'], true)) {
+            return false;
+        }
+
         // Legacy rows without subscription columns
         if (! Schema::hasColumn('companies', 'subscription_status')) {
             return true;
@@ -62,6 +68,29 @@ class CompanySubscription
         }
 
         return Carbon::parse($expiresAt)->isFuture();
+    }
+
+    public static function setAccountStatus(string $companyId, string $status): array
+    {
+        $status = ucfirst(strtolower(trim($status)));
+        if (! in_array($status, ['Active', 'Inactive'], true)) {
+            throw new \InvalidArgumentException('Status must be Active or Inactive.');
+        }
+
+        $company = DB::table('companies')->where('id', $companyId)->first();
+        if (! $company) {
+            throw new \RuntimeException('Company not found');
+        }
+
+        DB::table('companies')->where('id', $companyId)->update([
+            'status' => $status,
+            'updated_at' => now(),
+        ]);
+
+        return [
+            'id' => $companyId,
+            'status' => $status,
+        ];
     }
 
     public static function applyPlan(string $companyId, string $plan): array
@@ -93,8 +122,12 @@ class CompanySubscription
             'subscription_plan' => $plan,
             'subscription_expires_at' => $expiresAt,
             'subscription_status' => 'Active',
+            'status' => 'Active',
             'updated_at' => $now,
         ];
+        if (Schema::hasColumn('companies', 'subscription_reminder_sent_at')) {
+            $payload['subscription_reminder_sent_at'] = null;
+        }
 
         DB::table('companies')->where('id', $companyId)->update($payload);
 
@@ -105,6 +138,11 @@ class CompanySubscription
 
     public static function denyMessage(?object $company): string
     {
+        $accountStatus = strtolower((string) ($company->status ?? 'Active'));
+        if (in_array($accountStatus, ['inactive', 'disabled', 'deactivated'], true)) {
+            return 'Company account is deactivated. Contact Super Admin.';
+        }
+
         $status = (string) ($company->subscription_status ?? 'Pending');
         if ($status === 'Pending') {
             return 'Subscription pending. A Super Admin must activate your company before login.';

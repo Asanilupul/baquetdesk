@@ -41,10 +41,15 @@ function planLabel(plan) {
     return plan || '—';
 }
 
-function statusClass(status) {
+function subStatusClass(status) {
     if (status === 'Active') return 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30';
     if (status === 'Expired') return 'bg-rose-500/15 text-rose-300 border-rose-500/30';
     return 'bg-amber-500/15 text-amber-300 border-amber-500/30';
+}
+
+function accountStatusClass(status) {
+    if (String(status).toLowerCase() === 'active') return 'bg-sky-500/15 text-sky-300 border-sky-500/30';
+    return 'bg-slate-500/20 text-slate-300 border-slate-500/30';
 }
 
 function App() {
@@ -54,8 +59,11 @@ function App() {
     const [password, setPassword] = useState('');
     const [companies, setCompanies] = useState([]);
     const [error, setError] = useState('');
+    const [okMsg, setOkMsg] = useState('');
     const [loading, setLoading] = useState(false);
     const [busyId, setBusyId] = useState('');
+    const [showPwd, setShowPwd] = useState(false);
+    const [pwdForm, setPwdForm] = useState({ current_password: '', new_password: '', new_password_confirmation: '' });
 
     const loadCompanies = async (tok = token) => {
         const data = await api('/api/su/companies', { token: tok });
@@ -100,11 +108,13 @@ function App() {
         setToken('');
         setUser(null);
         setCompanies([]);
+        setShowPwd(false);
     };
 
     const setPlan = async (companyId, plan) => {
         setBusyId(companyId + plan);
         setError('');
+        setOkMsg('');
         try {
             await api(`/api/su/companies/${companyId}/subscription`, {
                 method: 'POST',
@@ -112,6 +122,47 @@ function App() {
                 body: { plan },
             });
             await loadCompanies();
+            setOkMsg('Subscription updated.');
+        } catch (err) {
+            setError(err.message || String(err));
+        } finally {
+            setBusyId('');
+        }
+    };
+
+    const setAccountStatus = async (companyId, status) => {
+        setBusyId(companyId + status);
+        setError('');
+        setOkMsg('');
+        try {
+            await api(`/api/su/companies/${companyId}/status`, {
+                method: 'POST',
+                token,
+                body: { status },
+            });
+            await loadCompanies();
+            setOkMsg(`Company ${status === 'Active' ? 'activated' : 'deactivated'}.`);
+        } catch (err) {
+            setError(err.message || String(err));
+        } finally {
+            setBusyId('');
+        }
+    };
+
+    const changePassword = async (e) => {
+        e.preventDefault();
+        setError('');
+        setOkMsg('');
+        setBusyId('pwd');
+        try {
+            await api('/api/su/change-password', {
+                method: 'POST',
+                token,
+                body: pwdForm,
+            });
+            setPwdForm({ current_password: '', new_password: '', new_password_confirmation: '' });
+            setShowPwd(false);
+            setOkMsg('Super Admin password updated.');
         } catch (err) {
             setError(err.message || String(err));
         } finally {
@@ -152,15 +203,41 @@ function App() {
                 <div>
                     <p className="text-[10px] font-black uppercase tracking-[0.2em] text-indigo-400">BanquetDesk</p>
                     <h1 className="text-3xl font-black tracking-tight">Subscription Control</h1>
-                    <p className="text-sm text-slate-400 mt-1">Activate, renew, or set lifetime access for registered companies.</p>
+                    <p className="text-sm text-slate-400 mt-1">Activate / deactivate companies, renew plans, and manage Super Admin access.</p>
                 </div>
-                <div className="flex gap-3">
+                <div className="flex flex-wrap gap-3">
+                    <button onClick={() => setShowPwd(v => !v)} className="px-4 py-2 rounded-xl bg-indigo-600/20 border border-indigo-500/30 text-indigo-200 text-xs font-black uppercase">
+                        {showPwd ? 'Close Password' : 'Change Password'}
+                    </button>
                     <button onClick={() => loadCompanies()} className="px-4 py-2 rounded-xl bg-slate-800 border border-slate-700 text-xs font-black uppercase">Refresh</button>
                     <button onClick={logout} className="px-4 py-2 rounded-xl bg-rose-600/20 border border-rose-500/30 text-rose-300 text-xs font-black uppercase">Logout</button>
                 </div>
             </header>
 
             {error && <p className="text-rose-300 text-sm font-bold bg-rose-500/10 border border-rose-500/20 rounded-2xl p-4">{error}</p>}
+            {okMsg && <p className="text-emerald-300 text-sm font-bold bg-emerald-500/10 border border-emerald-500/20 rounded-2xl p-4">{okMsg}</p>}
+
+            {showPwd && (
+                <form onSubmit={changePassword} className="rounded-[28px] border border-slate-800 bg-slate-900/70 p-6 grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div>
+                        <label className="text-[10px] font-black uppercase text-slate-500">Current password</label>
+                        <input type="password" required value={pwdForm.current_password} onChange={e => setPwdForm({ ...pwdForm, current_password: e.target.value })} className="w-full mt-1 p-3 rounded-2xl bg-slate-950 border border-slate-700 outline-none focus:border-indigo-500 text-sm font-bold" />
+                    </div>
+                    <div>
+                        <label className="text-[10px] font-black uppercase text-slate-500">New password</label>
+                        <input type="password" required value={pwdForm.new_password} onChange={e => setPwdForm({ ...pwdForm, new_password: e.target.value })} className="w-full mt-1 p-3 rounded-2xl bg-slate-950 border border-slate-700 outline-none focus:border-indigo-500 text-sm font-bold" />
+                    </div>
+                    <div>
+                        <label className="text-[10px] font-black uppercase text-slate-500">Confirm new password</label>
+                        <input type="password" required value={pwdForm.new_password_confirmation} onChange={e => setPwdForm({ ...pwdForm, new_password_confirmation: e.target.value })} className="w-full mt-1 p-3 rounded-2xl bg-slate-950 border border-slate-700 outline-none focus:border-indigo-500 text-sm font-bold" />
+                    </div>
+                    <div className="md:col-span-3 flex justify-end">
+                        <button disabled={busyId === 'pwd'} className="px-5 py-3 rounded-2xl bg-indigo-600 hover:bg-indigo-500 text-xs font-black uppercase disabled:opacity-50">
+                            {busyId === 'pwd' ? 'Saving…' : 'Update Password'}
+                        </button>
+                    </div>
+                </form>
+            )}
 
             <div className="overflow-x-auto rounded-[28px] border border-slate-800 bg-slate-900/70">
                 <table className="w-full text-left text-sm">
@@ -168,7 +245,8 @@ function App() {
                         <tr>
                             <th className="p-4">Company</th>
                             <th className="p-4">Admin</th>
-                            <th className="p-4">Status</th>
+                            <th className="p-4">Account</th>
+                            <th className="p-4">Subscription</th>
                             <th className="p-4">Plan</th>
                             <th className="p-4">Expires</th>
                             <th className="p-4">Actions</th>
@@ -176,47 +254,78 @@ function App() {
                     </thead>
                     <tbody>
                         {companies.length === 0 && (
-                            <tr><td colSpan="6" className="p-8 text-center text-slate-500">No companies yet.</td></tr>
+                            <tr><td colSpan="7" className="p-8 text-center text-slate-500">No companies yet.</td></tr>
                         )}
-                        {companies.map((c) => (
-                            <tr key={c.id} className="border-b border-slate-800/80 align-top">
-                                <td className="p-4">
-                                    <div className="font-black text-slate-100">{c.name}</div>
-                                    <div className="text-xs text-slate-500 mt-1">{c.email || c.phone || c.id}</div>
-                                </td>
-                                <td className="p-4 font-bold text-slate-300">{c.admin_username || '—'}</td>
-                                <td className="p-4">
-                                    <span className={`inline-flex px-2.5 py-1 rounded-full border text-[10px] font-black uppercase ${statusClass(c.subscription_status)}`}>
-                                        {c.subscription_status || 'Pending'}
-                                    </span>
-                                </td>
-                                <td className="p-4 font-bold">{planLabel(c.subscription_plan)}</td>
-                                <td className="p-4 text-slate-400">
-                                    {c.subscription_plan === 'lifetime' ? 'Never' : (c.subscription_expires_at ? String(c.subscription_expires_at).replace('T', ' ').slice(0, 19) : '—')}
-                                </td>
-                                <td className="p-4">
-                                    <div className="flex flex-wrap gap-2">
-                                        {[
-                                            ['1_month', '1 Month'],
-                                            ['12_months', '12 Months'],
-                                            ['lifetime', 'Lifetime'],
-                                        ].map(([plan, label]) => (
-                                            <button
-                                                key={plan}
-                                                disabled={!!busyId}
-                                                onClick={() => setPlan(c.id, plan)}
-                                                className="px-3 py-2 rounded-xl bg-indigo-600/20 hover:bg-indigo-600/35 border border-indigo-500/30 text-[10px] font-black uppercase disabled:opacity-50"
-                                            >
-                                                {busyId === c.id + plan ? '…' : label}
-                                            </button>
-                                        ))}
-                                    </div>
-                                </td>
-                            </tr>
-                        ))}
+                        {companies.map((c) => {
+                            const isActiveAccount = String(c.status || 'Active').toLowerCase() === 'active';
+                            return (
+                                <tr key={c.id} className="border-b border-slate-800/80 align-top">
+                                    <td className="p-4">
+                                        <div className="font-black text-slate-100">{c.name}</div>
+                                        <div className="text-xs text-slate-500 mt-1">{c.email || c.phone || c.id}</div>
+                                    </td>
+                                    <td className="p-4 font-bold text-slate-300">{c.admin_username || '—'}</td>
+                                    <td className="p-4">
+                                        <span className={`inline-flex px-2.5 py-1 rounded-full border text-[10px] font-black uppercase ${accountStatusClass(c.status)}`}>
+                                            {c.status || 'Active'}
+                                        </span>
+                                    </td>
+                                    <td className="p-4">
+                                        <span className={`inline-flex px-2.5 py-1 rounded-full border text-[10px] font-black uppercase ${subStatusClass(c.subscription_status)}`}>
+                                            {c.subscription_status || 'Pending'}
+                                        </span>
+                                    </td>
+                                    <td className="p-4 font-bold">{planLabel(c.subscription_plan)}</td>
+                                    <td className="p-4 text-slate-400">
+                                        {c.subscription_plan === 'lifetime' ? 'Never' : (c.subscription_expires_at ? String(c.subscription_expires_at).replace('T', ' ').slice(0, 19) : '—')}
+                                    </td>
+                                    <td className="p-4">
+                                        <div className="flex flex-wrap gap-2 mb-2">
+                                            {isActiveAccount ? (
+                                                <button
+                                                    disabled={!!busyId}
+                                                    onClick={() => setAccountStatus(c.id, 'Inactive')}
+                                                    className="px-3 py-2 rounded-xl bg-rose-600/20 hover:bg-rose-600/35 border border-rose-500/30 text-[10px] font-black uppercase disabled:opacity-50"
+                                                >
+                                                    {busyId === c.id + 'Inactive' ? '…' : 'Deactivate'}
+                                                </button>
+                                            ) : (
+                                                <button
+                                                    disabled={!!busyId}
+                                                    onClick={() => setAccountStatus(c.id, 'Active')}
+                                                    className="px-3 py-2 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/35 border border-emerald-500/30 text-[10px] font-black uppercase disabled:opacity-50"
+                                                >
+                                                    {busyId === c.id + 'Active' ? '…' : 'Activate'}
+                                                </button>
+                                            )}
+                                        </div>
+                                        <div className="flex flex-wrap gap-2">
+                                            {[
+                                                ['1_month', '1 Month'],
+                                                ['12_months', '12 Months'],
+                                                ['lifetime', 'Lifetime'],
+                                            ].map(([plan, label]) => (
+                                                <button
+                                                    key={plan}
+                                                    disabled={!!busyId}
+                                                    onClick={() => setPlan(c.id, plan)}
+                                                    className="px-3 py-2 rounded-xl bg-indigo-600/20 hover:bg-indigo-600/35 border border-indigo-500/30 text-[10px] font-black uppercase disabled:opacity-50"
+                                                >
+                                                    {busyId === c.id + plan ? '…' : label}
+                                                </button>
+                                            ))}
+                                        </div>
+                                    </td>
+                                </tr>
+                            );
+                        })}
                     </tbody>
                 </table>
             </div>
+
+            <p className="text-xs text-slate-500">
+                Payment reminders are emailed automatically when a subscription expires within 7 days (requires working SMTP in <code className="text-slate-400">.env</code> and server cron: <code className="text-slate-400">php artisan schedule:run</code>).
+            </p>
         </div>
     );
 }

@@ -92,7 +92,7 @@ class SuperAdminController extends Controller
                 'name' => $company->name,
                 'phone' => $company->phone ?? '',
                 'email' => $company->email ?? '',
-                'status' => $company->status ?? '',
+                'status' => $company->status ?? 'Active',
                 'subscription_plan' => $company->subscription_plan ?? null,
                 'subscription_expires_at' => $company->subscription_expires_at ?? null,
                 'subscription_status' => $company->subscription_status ?? 'Pending',
@@ -127,7 +127,81 @@ class SuperAdminController extends Controller
         }
     }
 
-    private function denyUnlessSu(Request $request): ?JsonResponse
+    public function setCompanyStatus(Request $request, string $id): JsonResponse
+    {
+        if ($deny = $this->denyUnlessSu($request)) {
+            return $deny;
+        }
+
+        $status = trim((string) $request->input('status', ''));
+
+        try {
+            $result = CompanySubscription::setAccountStatus($id, $status);
+
+            return response()->json(['data' => $result, 'error' => null]);
+        } catch (Throwable $e) {
+            $code = str_contains(strtolower($e->getMessage()), 'not found') ? 404 : 422;
+
+            return response()->json([
+                'data' => null,
+                'error' => ['message' => $e->getMessage()],
+            ], $code);
+        }
+    }
+
+    public function changePassword(Request $request): JsonResponse
+    {
+        $session = null;
+        if ($deny = $this->denyUnlessSu($request, $session)) {
+            return $deny;
+        }
+
+        $current = (string) $request->input('current_password', '');
+        $newPassword = (string) $request->input('new_password', '');
+        $confirm = (string) $request->input('new_password_confirmation', '');
+
+        if ($current === '' || $newPassword === '') {
+            return response()->json([
+                'data' => null,
+                'error' => ['message' => 'Current and new password are required'],
+            ], 422);
+        }
+
+        if (strlen($newPassword) < 4) {
+            return response()->json([
+                'data' => null,
+                'error' => ['message' => 'New password must be at least 4 characters'],
+            ], 422);
+        }
+
+        if ($newPassword !== $confirm) {
+            return response()->json([
+                'data' => null,
+                'error' => ['message' => 'New password confirmation does not match'],
+            ], 422);
+        }
+
+        $userId = (string) ($session['user_id'] ?? '');
+        $user = DB::table('users')->where('id', $userId)->where('role', 'SuperAdmin')->first();
+        if (! $user || (string) $user->password !== $current) {
+            return response()->json([
+                'data' => null,
+                'error' => ['message' => 'Current password is incorrect'],
+            ], 403);
+        }
+
+        DB::table('users')->where('id', $user->id)->update([
+            'password' => $newPassword,
+            'updated_at' => now(),
+        ]);
+
+        return response()->json([
+            'data' => ['ok' => true, 'username' => $user->username],
+            'error' => null,
+        ]);
+    }
+
+    private function denyUnlessSu(Request $request, ?array &$session = null): ?JsonResponse
     {
         $token = trim((string) $request->header('X-SU-Token', ''));
         if ($token === '') {
@@ -137,13 +211,15 @@ class SuperAdminController extends Controller
             ], 401);
         }
 
-        $session = Cache::get($this->tokenCacheKey($token));
-        if (! is_array($session) || ($session['role'] ?? '') !== 'SuperAdmin') {
+        $cached = Cache::get($this->tokenCacheKey($token));
+        if (! is_array($cached) || ($cached['role'] ?? '') !== 'SuperAdmin') {
             return response()->json([
                 'data' => null,
                 'error' => ['message' => 'Invalid or expired Super Admin session'],
             ], 401);
         }
+
+        $session = $cached;
 
         return null;
     }

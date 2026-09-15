@@ -16,6 +16,8 @@ Route::post('/company/{id}', [CompanyController::class, 'update']);
 Route::post('/su/login', [SuperAdminController::class, 'login']);
 Route::get('/su/companies', [SuperAdminController::class, 'companies']);
 Route::post('/su/companies/{id}/subscription', [SuperAdminController::class, 'updateSubscription']);
+Route::post('/su/companies/{id}/status', [SuperAdminController::class, 'setCompanyStatus']);
+Route::post('/su/change-password', [SuperAdminController::class, 'changePassword']);
 
 Route::get('/backup/status', [BackupController::class, 'status']);
 Route::post('/backup/settings', [BackupController::class, 'saveSettings']);
