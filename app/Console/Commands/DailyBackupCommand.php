@@ -10,7 +10,7 @@ class DailyBackupCommand extends Command
 {
     protected $signature = 'backup:daily {--force : Run even if auto backup is disabled}';
 
-    protected $description = 'Create a daily BanquetDesk backup zip on the server (cPanel path or storage/app/backups)';
+    protected $description = 'Create a daily BanquetDesk backup per company (company-isolated folders)';
 
     public function handle(BackupService $backups): int
     {
@@ -21,10 +21,21 @@ class DailyBackupCommand extends Command
         }
 
         try {
-            $result = $backups->createBackup('daily');
-            $this->info('Backup created: '.$result['filename'].' ('.$result['size'].' bytes) in '.$result['path']);
+            $results = $backups->createBackupForAllCompanies('daily');
+            $ok = 0;
+            $fail = 0;
+            foreach ($results as $row) {
+                if (! empty($row['error'])) {
+                    $fail++;
+                    $this->error(($row['name'] ?? $row['company_id']).': '.$row['error']);
+                } else {
+                    $ok++;
+                    $this->info(($row['name'] ?? $row['company_id']).': '.$row['filename'].' ('.$row['size'].' bytes)');
+                }
+            }
+            $this->info("Done. Success: {$ok}, Failed: {$fail}");
 
-            return self::SUCCESS;
+            return $fail > 0 && $ok === 0 ? self::FAILURE : self::SUCCESS;
         } catch (Throwable $e) {
             $this->error('Backup failed: '.$e->getMessage());
 

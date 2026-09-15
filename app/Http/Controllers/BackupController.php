@@ -3,21 +3,34 @@
 namespace App\Http\Controllers;
 
 use App\Services\BackupService;
+use App\Support\CompanySubscription;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Symfony\Component\HttpFoundation\BinaryFileResponse;
 use Throwable;
 
 class BackupController extends Controller
 {
-    public function status(BackupService $backups): JsonResponse
+    public function status(Request $request, BackupService $backups): JsonResponse
     {
-        return response()->json(['data' => $backups->status(), 'error' => null]);
+        if ($deny = $this->denyUnlessCompany($request)) {
+            return $deny;
+        }
+
+        $companyId = $this->companyId($request);
+
+        return response()->json(['data' => $backups->status($companyId), 'error' => null]);
     }
 
     public function saveSettings(Request $request, BackupService $backups): JsonResponse
     {
+        if ($deny = $this->denyUnlessCompany($request)) {
+            return $deny;
+        }
+
+        $companyId = $this->companyId($request);
         $auto = $request->boolean('auto_enabled', true);
         $path = trim((string) $request->input('path', ''));
         $retention = max(1, min(365, (int) $request->input('retention_days', 14)));
@@ -25,10 +38,11 @@ class BackupController extends Controller
         if ($path !== '' && ! preg_match('#^([A-Za-z]:[\\\\/]|/|\\\\|storage/)#', $path)) {
             return response()->json([
                 'data' => null,
-                'error' => ['message' => 'Backup path must be an absolute cPanel/server path (e.g. /home/USER/backups) or storage/app/backups'],
+                'error' => ['message' => 'Backup path must be an absolute server path or storage/app/backups'],
             ], 422);
         }
 
+        // Global path/retention settings (base folder); company files still go in base/{company_id}
         $pairs = [
             'backup_auto_enabled' => $auto ? '1' : '0',
             'backup_path' => $path,
@@ -41,15 +55,21 @@ class BackupController extends Controller
             );
         }
 
-        return response()->json(['data' => $backups->status(), 'error' => null]);
+        return response()->json(['data' => $backups->status($companyId), 'error' => null]);
     }
 
-    public function runNow(BackupService $backups): JsonResponse
+    public function runNow(Request $request, BackupService $backups): JsonResponse
     {
-        try {
-            $result = $backups->createBackup('manual-server');
+        if ($deny = $this->denyUnlessCompany($request)) {
+            return $deny;
+        }
 
-            return response()->json(['data' => $result + ['status' => $backups->status()], 'error' => null]);
+        $companyId = $this->companyId($request);
+
+        try {
+            $result = $backups->createBackup('manual-server', $companyId);
+
+            return response()->json(['data' => $result + ['status' => $backups->status($companyId)], 'error' => null]);
         } catch (Throwable $e) {
             return response()->json([
                 'data' => null,
@@ -58,10 +78,16 @@ class BackupController extends Controller
         }
     }
 
-    public function download(BackupService $backups): BinaryFileResponse|JsonResponse
+    public function download(Request $request, BackupService $backups): BinaryFileResponse|JsonResponse
     {
+        if ($deny = $this->denyUnlessCompany($request)) {
+            return $deny;
+        }
+
+        $companyId = $this->companyId($request);
+
         try {
-            $result = $backups->createBackup('manual-download');
+            $result = $backups->createBackup('manual-download', $companyId);
             $filename = $result['filename'];
             $mime = 'application/octet-stream';
             if (str_ends_with(strtolower($filename), '.zip')) {
@@ -85,10 +111,15 @@ class BackupController extends Controller
 
     /**
      * Emergency restore from uploaded backup OR a server backup filename.
-     * Requires valid Admin username + password.
+     * Requires valid Admin username + password for the SAME company.
      */
     public function restore(Request $request, BackupService $backups): JsonResponse
     {
+        if ($deny = $this->denyUnlessCompany($request)) {
+            return $deny;
+        }
+
+        $companyId = $this->companyId($request);
         $username = trim((string) $request->input('admin_username', ''));
         $password = (string) $request->input('admin_password', '');
 
@@ -99,16 +130,21 @@ class BackupController extends Controller
             ], 422);
         }
 
-        $admin = DB::table('users')
+        $adminQuery = DB::table('users')
             ->where('username', $username)
             ->where('password', $password)
-            ->where('role', 'Admin')
-            ->first();
+            ->where('role', 'Admin');
+
+        if (Schema::hasColumn('users', 'company_id')) {
+            $adminQuery->where('company_id', $companyId);
+        }
+
+        $admin = $adminQuery->first();
 
         if (! $admin) {
             return response()->json([
                 'data' => null,
-                'error' => ['message' => 'Invalid Admin password. Restore cancelled.'],
+                'error' => ['message' => 'Invalid Admin credentials for this company. Restore cancelled.'],
             ], 403);
         }
 
@@ -141,7 +177,7 @@ class BackupController extends Controller
                 $absolute = storage_path('app/'.$stored);
 
                 try {
-                    $result = $backups->restoreFromFile($absolute, $name);
+                    $result = $backups->restoreFromFile($absolute, $name, $companyId);
                 } finally {
                     if (is_file($absolute)) {
                         @unlink($absolute);
@@ -149,17 +185,17 @@ class BackupController extends Controller
                 }
 
                 return response()->json([
-                    'data' => $result + ['status' => $backups->status()],
+                    'data' => $result + ['status' => $backups->status($companyId)],
                     'error' => null,
                 ]);
             }
 
             $serverFile = trim((string) $request->input('server_filename', ''));
             if ($serverFile !== '') {
-                $result = $backups->restoreFromServerFilename($serverFile);
+                $result = $backups->restoreFromServerFilename($serverFile, $companyId);
 
                 return response()->json([
-                    'data' => $result + ['status' => $backups->status()],
+                    'data' => $result + ['status' => $backups->status($companyId)],
                     'error' => null,
                 ]);
             }
@@ -174,5 +210,45 @@ class BackupController extends Controller
                 'error' => ['message' => $e->getMessage()],
             ], 500);
         }
+    }
+
+    private function companyId(Request $request): string
+    {
+        return trim((string) ($request->header('X-Company-Id') ?: $request->input('company_id', '')));
+    }
+
+    private function denyUnlessCompany(Request $request): ?JsonResponse
+    {
+        $companyId = $this->companyId($request);
+        if ($companyId === '') {
+            return response()->json([
+                'data' => null,
+                'error' => ['message' => 'Company session required (X-Company-Id). Log in first.'],
+            ], 401);
+        }
+
+        if (! Schema::hasTable('companies')) {
+            return response()->json([
+                'data' => null,
+                'error' => ['message' => 'Companies table missing'],
+            ], 500);
+        }
+
+        $company = DB::table('companies')->where('id', $companyId)->first();
+        if (! $company) {
+            return response()->json([
+                'data' => null,
+                'error' => ['message' => 'Company not found'],
+            ], 404);
+        }
+
+        if (! CompanySubscription::isUsable($company)) {
+            return response()->json([
+                'data' => null,
+                'error' => ['message' => CompanySubscription::denyMessage($company)],
+            ], 403);
+        }
+
+        return null;
     }
 }
