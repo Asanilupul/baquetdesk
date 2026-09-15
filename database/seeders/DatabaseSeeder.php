@@ -4,6 +4,7 @@ namespace Database\Seeders;
 
 use Illuminate\Database\Seeder;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 
@@ -17,7 +18,7 @@ class DatabaseSeeder extends Seeder
             [
                 'id' => (string) Str::uuid(),
                 'username' => 'admin',
-                'password' => 'admin123',
+                'password' => Hash::make('admin123'),
                 'role' => 'Admin',
                 'created_at' => $now,
                 'updated_at' => $now,
@@ -25,7 +26,7 @@ class DatabaseSeeder extends Seeder
             [
                 'id' => (string) Str::uuid(),
                 'username' => 'manager',
-                'password' => 'manager123',
+                'password' => Hash::make('manager123'),
                 'role' => 'Manager',
                 'created_at' => $now,
                 'updated_at' => $now,
@@ -33,7 +34,7 @@ class DatabaseSeeder extends Seeder
             [
                 'id' => (string) Str::uuid(),
                 'username' => 'accountant',
-                'password' => 'account123',
+                'password' => Hash::make('account123'),
                 'role' => 'Accountant',
                 'created_at' => $now,
                 'updated_at' => $now,
@@ -42,14 +43,14 @@ class DatabaseSeeder extends Seeder
 
         // Fix manager password to match original SPA default
         DB::table('users')->where('username', 'manager')->update([
-            'password' => 'snap123',
+            'password' => Hash::make('snap123'),
             'updated_at' => $now,
         ]);
 
         // Developer Super Admin (no company scope)
         $suPayload = [
             'username' => 'suadmin',
-            'password' => 'SuAdmin@2026',
+            'password' => Hash::make('SuAdmin@2026'),
             'role' => 'SuperAdmin',
             'updated_at' => $now,
         ];

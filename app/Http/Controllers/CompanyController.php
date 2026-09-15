@@ -2,9 +2,11 @@
 
 namespace App\Http\Controllers;
 
+use App\Support\CompanyApiSession;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use Throwable;
@@ -71,7 +73,7 @@ class CompanyController extends Controller
                 DB::table('users')->insert([
                     'id' => $userId,
                     'username' => $username,
-                    'password' => $password,
+                    'password' => Hash::make($password),
                     'role' => 'Admin',
                     'company_id' => $companyId,
                     'created_at' => $now,
@@ -114,16 +116,34 @@ class CompanyController extends Controller
 
     public function show(Request $request, string $id): JsonResponse
     {
+        $session = CompanyApiSession::fromRequest($request);
+        if ($session === null || $session['company_id'] === '' || ! hash_equals($session['company_id'], $id)) {
+            return response()->json([
+                'data' => null,
+                'error' => ['message' => 'Company session required'],
+            ], 403);
+        }
+
         $company = DB::table('companies')->where('id', $id)->first();
         if (! $company) {
             return response()->json(['data' => null, 'error' => ['message' => 'Company not found']], 404);
         }
 
-        return response()->json(['data' => (array) $company, 'error' => null]);
+        $data = (array) $company;
+        // Public company profile for the owning session only
+        return response()->json(['data' => $data, 'error' => null]);
     }
 
     public function update(Request $request, string $id): JsonResponse
     {
+        $session = CompanyApiSession::fromRequest($request);
+        if ($session === null || $session['company_id'] === '' || ! hash_equals($session['company_id'], $id)) {
+            return response()->json([
+                'data' => null,
+                'error' => ['message' => 'Company session required'],
+            ], 403);
+        }
+
         $company = DB::table('companies')->where('id', $id)->first();
         if (! $company) {
             return response()->json(['data' => null, 'error' => ['message' => 'Company not found']], 404);

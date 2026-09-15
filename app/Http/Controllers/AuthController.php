@@ -1,0 +1,132 @@
+<?php
+
+namespace App\Http\Controllers;
+
+use App\Support\CompanyApiSession;
+use App\Support\CompanySubscription;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Schema;
+use Throwable;
+
+class AuthController extends Controller
+{
+    public function login(Request $request): JsonResponse
+    {
+        $username = trim((string) $request->input('username', ''));
+        $password = (string) $request->input('password', '');
+
+        if ($username === '' || $password === '') {
+            return response()->json([
+                'data' => null,
+                'error' => ['message' => 'Invalid credentials. Check your username and password.'],
+            ], 401);
+        }
+
+        try {
+            // 1) Staff / company users
+            $user = DB::table('users')->where('username', $username)->first();
+            if ($user && $this->passwordMatches($user, $password, 'users')) {
+                if (($user->role ?? '') === 'SuperAdmin') {
+                    return response()->json([
+                        'data' => null,
+                        'error' => ['message' => 'Use /su-admin for Super Admin login'],
+                    ], 403);
+                }
+
+                $companyId = trim((string) ($user->company_id ?? ''));
+                if ($companyId !== '' && Schema::hasTable('companies')) {
+                    $company = DB::table('companies')->where('id', $companyId)->first();
+                    if (! CompanySubscription::isUsable($company)) {
+                        return response()->json([
+                            'data' => null,
+                            'error' => ['message' => CompanySubscription::denyMessage($company)],
+                        ], 403);
+                    }
+                }
+
+                $payload = $this->publicUser($user);
+                $payload['api_token'] = CompanyApiSession::issue([
+                    'user_id' => (string) $user->id,
+                    'company_id' => $companyId,
+                    'role' => (string) ($user->role ?? ''),
+                    'username' => (string) $user->username,
+                ]);
+
+                return response()->json([
+                    'data' => $payload,
+                    'error' => null,
+                ]);
+            }
+
+            // 2) Vendor portal users
+            if (Schema::hasTable('vendors')) {
+                $vendor = DB::table('vendors')->where('username', $username)->first();
+                if ($vendor && $this->passwordMatches($vendor, $password, 'vendors')) {
+                    $payload = $this->publicUser($vendor);
+                    $payload['role'] = 'Vendor';
+                    $payload['api_token'] = CompanyApiSession::issue([
+                        'user_id' => (string) $vendor->id,
+                        'company_id' => trim((string) ($vendor->company_id ?? '')),
+                        'role' => 'Vendor',
+                        'username' => (string) ($vendor->username ?? ''),
+                    ]);
+
+                    return response()->json([
+                        'data' => $payload,
+                        'error' => null,
+                    ]);
+                }
+            }
+
+            return response()->json([
+                'data' => null,
+                'error' => ['message' => 'Invalid credentials. Check your username and password.'],
+            ], 401);
+        } catch (Throwable $e) {
+            return response()->json([
+                'data' => null,
+                'error' => ['message' => 'Authentication temporarily unavailable'],
+            ], 500);
+        }
+    }
+
+    private function passwordMatches(object $row, string $plain, string $table): bool
+    {
+        $stored = (string) ($row->password ?? '');
+        if ($stored === '') {
+            return false;
+        }
+
+        if (Hash::isHashed($stored)) {
+            return Hash::check($plain, $stored);
+        }
+
+        // Legacy plaintext upgrade path (one-time)
+        if (hash_equals($stored, $plain)) {
+            if (Schema::hasColumn($table, 'password')) {
+                DB::table($table)->where('id', $row->id)->update([
+                    'password' => Hash::make($plain),
+                    'updated_at' => now(),
+                ]);
+            }
+
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function publicUser(object $row): array
+    {
+        $arr = (array) $row;
+        unset($arr['password']);
+
+        return $arr;
+    }
+}

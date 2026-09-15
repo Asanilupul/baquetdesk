@@ -3,10 +3,12 @@
 namespace App\Http\Controllers;
 
 use App\Services\BackupService;
+use App\Support\CompanyApiSession;
 use App\Support\CompanySubscription;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Schema;
 use Symfony\Component\HttpFoundation\BinaryFileResponse;
 use Throwable;
@@ -132,7 +134,6 @@ class BackupController extends Controller
 
         $adminQuery = DB::table('users')
             ->where('username', $username)
-            ->where('password', $password)
             ->where('role', 'Admin');
 
         if (Schema::hasColumn('users', 'company_id')) {
@@ -140,8 +141,21 @@ class BackupController extends Controller
         }
 
         $admin = $adminQuery->first();
+        $passwordOk = false;
+        if ($admin) {
+            $stored = (string) ($admin->password ?? '');
+            if (Hash::isHashed($stored)) {
+                $passwordOk = Hash::check($password, $stored);
+            } elseif (hash_equals($stored, $password)) {
+                DB::table('users')->where('id', $admin->id)->update([
+                    'password' => Hash::make($password),
+                    'updated_at' => now(),
+                ]);
+                $passwordOk = true;
+            }
+        }
 
-        if (! $admin) {
+        if (! $admin || ! $passwordOk) {
             return response()->json([
                 'data' => null,
                 'error' => ['message' => 'Invalid Admin credentials for this company. Restore cancelled.'],
@@ -163,6 +177,15 @@ class BackupController extends Controller
                 $allowed = ['zip', 'tar', 'gz', 'json', 'tgz'];
                 $name = $file->getClientOriginalName();
                 $nameLower = strtolower($name);
+                $dangerous = ['.php', '.phtml', '.phar', '.htaccess', '.shtml', '.jsp', '.aspx', '.exe', '.sh', '.bat'];
+                foreach ($dangerous as $bad) {
+                    if (str_contains($nameLower, $bad)) {
+                        return response()->json([
+                            'data' => null,
+                            'error' => ['message' => 'Upload rejected: unsafe filename'],
+                        ], 422);
+                    }
+                }
                 $ok = in_array($ext, $allowed, true)
                     || str_ends_with($nameLower, '.tar.gz')
                     || str_ends_with($nameLower, '.json.gz');
@@ -173,7 +196,13 @@ class BackupController extends Controller
                     ], 422);
                 }
 
-                $stored = $file->storeAs('backup-uploads', 'restore_'.uniqid().'_'.preg_replace('/[^A-Za-z0-9._-]/', '_', $name), 'local');
+                $safeName = 'restore_'.uniqid('', true).'.'.$ext;
+                if (str_ends_with($nameLower, '.tar.gz')) {
+                    $safeName = 'restore_'.uniqid('', true).'.tar.gz';
+                } elseif (str_ends_with($nameLower, '.json.gz')) {
+                    $safeName = 'restore_'.uniqid('', true).'.json.gz';
+                }
+                $stored = $file->storeAs('backup-uploads', $safeName, 'local');
                 $absolute = storage_path('app/'.$stored);
 
                 try {
@@ -214,11 +243,24 @@ class BackupController extends Controller
 
     private function companyId(Request $request): string
     {
+        $session = CompanyApiSession::fromRequest($request);
+        if ($session && $session['company_id'] !== '') {
+            return $session['company_id'];
+        }
+
         return trim((string) ($request->header('X-Company-Id') ?: $request->input('company_id', '')));
     }
 
     private function denyUnlessCompany(Request $request): ?JsonResponse
     {
+        $session = CompanyApiSession::fromRequest($request);
+        if ($session === null) {
+            return response()->json([
+                'data' => null,
+                'error' => ['message' => 'Authentication required. Please log in again.'],
+            ], 401);
+        }
+
         $companyId = $this->companyId($request);
         if ($companyId === '') {
             return response()->json([

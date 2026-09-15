@@ -7,6 +7,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use Throwable;
@@ -29,7 +30,6 @@ class SuperAdminController extends Controller
 
         $query = DB::table('users')
             ->where('username', $username)
-            ->where('password', $password)
             ->where('role', 'SuperAdmin');
 
         if (Schema::hasColumn('users', 'company_id')) {
@@ -39,7 +39,7 @@ class SuperAdminController extends Controller
         }
 
         $user = $query->first();
-        if (! $user) {
+        if (! $user || ! $this->passwordMatches($user, $password)) {
             return response()->json([
                 'data' => null,
                 'error' => ['message' => 'Invalid Super Admin credentials'],
@@ -183,7 +183,7 @@ class SuperAdminController extends Controller
 
         $userId = (string) ($session['user_id'] ?? '');
         $user = DB::table('users')->where('id', $userId)->where('role', 'SuperAdmin')->first();
-        if (! $user || (string) $user->password !== $current) {
+        if (! $user || ! $this->passwordMatches($user, $current)) {
             return response()->json([
                 'data' => null,
                 'error' => ['message' => 'Current password is incorrect'],
@@ -191,7 +191,7 @@ class SuperAdminController extends Controller
         }
 
         DB::table('users')->where('id', $user->id)->update([
-            'password' => $newPassword,
+            'password' => Hash::make($newPassword),
             'updated_at' => now(),
         ]);
 
@@ -199,6 +199,29 @@ class SuperAdminController extends Controller
             'data' => ['ok' => true, 'username' => $user->username],
             'error' => null,
         ]);
+    }
+
+    private function passwordMatches(object $row, string $plain): bool
+    {
+        $stored = (string) ($row->password ?? '');
+        if ($stored === '') {
+            return false;
+        }
+
+        if (Hash::isHashed($stored)) {
+            return Hash::check($plain, $stored);
+        }
+
+        if (hash_equals($stored, $plain)) {
+            DB::table('users')->where('id', $row->id)->update([
+                'password' => Hash::make($plain),
+                'updated_at' => now(),
+            ]);
+
+            return true;
+        }
+
+        return false;
     }
 
     private function denyUnlessSu(Request $request, ?array &$session = null): ?JsonResponse

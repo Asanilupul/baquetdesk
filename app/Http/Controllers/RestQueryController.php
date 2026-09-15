@@ -2,10 +2,12 @@
 
 namespace App\Http\Controllers;
 
+use App\Support\CompanyApiSession;
 use App\Support\CompanySubscription;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use Throwable;
@@ -100,34 +102,80 @@ class RestQueryController extends Controller
             $onConflict = $request->input('onConflict');
             $returnRows = (bool) $request->input('returnRows', false);
 
-            // Login lookups must remain unscoped
-            $skipCompanyScope = in_array($table, ['users', 'vendors', 'companies'], true)
-                && in_array($action, ['select'], true)
-                && $companyId === '';
+            // Public vendor self-registration is the only unscoped write allowed
+            $isPublicVendorRegister = $table === 'vendors' && $action === 'insert' && $companyId === '';
+            $session = null;
 
-            if ($companyId !== '' && ! $skipCompanyScope) {
+            if (! $isPublicVendorRegister) {
+                $session = CompanyApiSession::fromRequest($request);
+                if ($session === null) {
+                    return response()->json([
+                        'data' => null,
+                        'error' => ['message' => 'Authentication required. Please log in again.'],
+                    ], 401);
+                }
+                // Token company is authoritative (prevents X-Company-Id spoofing)
+                if ($session['company_id'] !== '') {
+                    $companyId = $session['company_id'];
+                }
+            }
+
+            if ($companyId === '' && ! $isPublicVendorRegister) {
+                return response()->json([
+                    'data' => null,
+                    'error' => ['message' => 'Company session required (X-Company-Id).'],
+                ], 401);
+            }
+
+            if (in_array($table, ['companies'], true) && in_array($action, ['insert', 'delete', 'upsert'], true)) {
+                return response()->json([
+                    'data' => null,
+                    'error' => ['message' => 'Company records cannot be created or deleted via this API'],
+                ], 403);
+            }
+
+            if ($companyId !== '') {
                 if ($deny = $this->denyIfCompanyUnusable($companyId)) {
                     return $deny;
                 }
             }
 
+            // Only Admins may create/change user roles
+            if ($table === 'users' && in_array($action, ['insert', 'update', 'upsert'], true)) {
+                $actorRole = $session['role'] ?? '';
+                if ($actorRole !== 'Admin') {
+                    $payloadRows = is_array($payload) ? (array_is_list($payload) ? $payload : [$payload]) : [];
+                    foreach ($payloadRows as $row) {
+                        if (is_array($row) && array_key_exists('role', $row)) {
+                            return response()->json([
+                                'data' => null,
+                                'error' => ['message' => 'Only Admins can manage user roles'],
+                            ], 403);
+                        }
+                    }
+                }
+            }
+
+            // Never allow password filters (use /api/auth/login)
+            if (is_array($filters)) {
+                foreach ($filters as $filter) {
+                    if (is_array($filter) && strtolower((string) ($filter['column'] ?? '')) === 'password') {
+                        return response()->json([
+                            'data' => null,
+                            'error' => ['message' => 'Password filter is not allowed'],
+                        ], 400);
+                    }
+                }
+            }
+
             $result = match ($action) {
-                'select' => $this->runSelect($table, $select, $filters, $order, $limit, $single, $maybeSingle, $skipCompanyScope ? '' : $companyId),
+                'select' => $this->runSelect($table, $select, $filters, $order, $limit, $single, $maybeSingle, $companyId),
                 'insert' => $this->runInsert($table, $payload, $returnRows || $single || $maybeSingle, $single, $maybeSingle, $companyId),
                 'update' => $this->runUpdate($table, $payload, $filters, $returnRows || $single || $maybeSingle, $single, $maybeSingle, $companyId),
                 'delete' => $this->runDelete($table, $filters, $companyId),
                 'upsert' => $this->runUpsert($table, $payload, $onConflict, $returnRows || $single || $maybeSingle, $single, $maybeSingle, $companyId),
                 default => throw new \InvalidArgumentException("Unsupported action: {$action}"),
             };
-
-            if ($action === 'select' && $table === 'users' && $skipCompanyScope) {
-                if (! (is_array($result) && array_key_exists('__error', $result))) {
-                    $blocked = $this->blockUnusableCompanyLogin($result, $single || $maybeSingle);
-                    if ($blocked !== null) {
-                        return $blocked;
-                    }
-                }
-            }
 
             if (is_array($result) && array_key_exists('__error', $result)) {
                 return response()->json([
@@ -153,10 +201,26 @@ class RestQueryController extends Controller
             $attendanceEnd = (string) $request->input('attendance_end', '');
             $companyId = $this->resolveCompanyId($request);
 
-            if ($companyId !== '') {
-                if ($deny = $this->denyIfCompanyUnusable($companyId)) {
-                    return $deny;
-                }
+            $session = CompanyApiSession::fromRequest($request);
+            if ($session === null) {
+                return response()->json([
+                    'data' => null,
+                    'error' => ['message' => 'Authentication required. Please log in again.'],
+                ], 401);
+            }
+            if ($session['company_id'] !== '') {
+                $companyId = $session['company_id'];
+            }
+
+            if ($companyId === '') {
+                return response()->json([
+                    'data' => null,
+                    'error' => ['message' => 'Company session required (X-Company-Id).'],
+                ], 401);
+            }
+
+            if ($deny = $this->denyIfCompanyUnusable($companyId)) {
+                return $deny;
             }
 
             $payload = [];
@@ -314,12 +378,24 @@ class RestQueryController extends Controller
 
     private function applyCompanyScope($query, string $table, string $companyId): void
     {
-        if ($companyId === '' || $table === 'system_settings' || $table === 'companies') {
+        if ($companyId === '') {
             return;
         }
+
+        if ($table === 'companies') {
+            $query->where('id', $companyId);
+
+            return;
+        }
+
+        if ($table === 'system_settings') {
+            return;
+        }
+
         if (! Schema::hasColumn($table, 'company_id')) {
             return;
         }
+
         $query->where('company_id', $companyId);
     }
 
@@ -341,19 +417,30 @@ class RestQueryController extends Controller
     ): mixed {
         $query = DB::table($table);
         $this->applyCompanyScope($query, $table, $companyId);
-        $this->applyFilters($query, $filters);
+        $this->applyFilters($query, $filters, $table);
 
         if (is_string($select) && $select !== '*') {
-            $cols = array_map('trim', explode(',', $select));
+            $allowed = $this->columnsFor($table);
+            $cols = array_values(array_filter(
+                array_map('trim', explode(',', $select)),
+                fn ($col) => $col !== '' && in_array($col, $allowed, true)
+            ));
+            if ($cols === []) {
+                throw new \InvalidArgumentException('No valid select columns');
+            }
             $query->select($cols);
         }
 
         if (is_array($order) && ! empty($order['column'])) {
-            $query->orderBy($order['column'], ($order['ascending'] ?? true) ? 'asc' : 'desc');
+            $orderColumn = (string) $order['column'];
+            if (! in_array($orderColumn, $this->columnsFor($table), true)) {
+                throw new \InvalidArgumentException("Unknown order column: {$orderColumn}");
+            }
+            $query->orderBy($orderColumn, ($order['ascending'] ?? true) ? 'asc' : 'desc');
         }
 
         if ($limit !== null && $limit !== '') {
-            $query->limit((int) $limit);
+            $query->limit(min(10000, max(1, (int) $limit)));
         }
 
         $rows = $query->get()->map(fn ($row) => $this->decodeRow($table, (array) $row))->all();
@@ -373,7 +460,7 @@ class RestQueryController extends Controller
         $prepared = [];
 
         foreach ($rows as $row) {
-            if ($companyId !== '' && Schema::hasColumn($table, 'company_id') && empty($row['company_id'])) {
+            if ($companyId !== '' && Schema::hasColumn($table, 'company_id')) {
                 $row['company_id'] = $companyId;
             }
             $prepared[] = $this->prepareWriteRow($table, $row, true);
@@ -405,10 +492,10 @@ class RestQueryController extends Controller
 
         $query = DB::table($table);
         $this->applyCompanyScope($query, $table, $companyId);
-        $this->applyFilters($query, $filters);
+        $this->applyFilters($query, $filters, $table);
 
         $update = $this->prepareWriteRow($table, $payload, false);
-        unset($update['id'], $update['key']);
+        unset($update['id'], $update['key'], $update['company_id']);
 
         if ($table !== 'system_settings') {
             $update['updated_at'] = now();
@@ -424,7 +511,7 @@ class RestQueryController extends Controller
 
         $rows = DB::table($table);
         $this->applyCompanyScope($rows, $table, $companyId);
-        $this->applyFilters($rows, $filters);
+        $this->applyFilters($rows, $filters, $table);
         $decoded = $rows->get()->map(fn ($row) => $this->decodeRow($table, (array) $row))->all();
 
         return $this->shapeResult($decoded, $single, $maybeSingle);
@@ -434,7 +521,7 @@ class RestQueryController extends Controller
     {
         $query = DB::table($table);
         $this->applyCompanyScope($query, $table, $companyId);
-        $this->applyFilters($query, $filters);
+        $this->applyFilters($query, $filters, $table);
         $query->delete();
 
         return null;
@@ -454,7 +541,7 @@ class RestQueryController extends Controller
         $saved = [];
 
         foreach ($rows as $row) {
-            if ($companyId !== '' && Schema::hasColumn($table, 'company_id') && empty($row['company_id'])) {
+            if ($companyId !== '' && Schema::hasColumn($table, 'company_id')) {
                 $row['company_id'] = $companyId;
             }
             $prepared = $this->prepareWriteRow($table, $row, true);
@@ -506,18 +593,24 @@ class RestQueryController extends Controller
         return $this->shapeResult($saved, $single, $maybeSingle);
     }
 
-    private function applyFilters($query, mixed $filters): void
+    private function applyFilters($query, mixed $filters, ?string $table = null): void
     {
         if (! is_array($filters)) {
             return;
         }
+
+        $allowedColumns = $table ? $this->columnsFor($table) : null;
 
         foreach ($filters as $filter) {
             if (! is_array($filter) || empty($filter['column'])) {
                 continue;
             }
 
-            $column = $filter['column'];
+            $column = (string) $filter['column'];
+            if ($allowedColumns !== null && ! in_array($column, $allowedColumns, true)) {
+                throw new \InvalidArgumentException("Unknown filter column: {$column}");
+            }
+
             $op = $filter['op'] ?? 'eq';
             $value = $filter['value'] ?? null;
 
@@ -556,8 +649,20 @@ class RestQueryController extends Controller
         $columns = $this->columnsFor($table);
         $out = [];
 
+        // Privilege / billing fields must not be client-writable via RestQuery
+        $blocked = [];
+        if ($table === 'companies') {
+            $blocked = ['subscription_plan', 'subscription_expires_at', 'subscription_status', 'status'];
+        }
+        if ($table === 'users') {
+            $blocked = [];
+        }
+
         foreach ($row as $key => $value) {
             if (! in_array($key, $columns, true)) {
+                continue;
+            }
+            if (in_array($key, $blocked, true)) {
                 continue;
             }
 
@@ -572,6 +677,23 @@ class RestQueryController extends Controller
             }
 
             $out[$key] = $value;
+        }
+
+        if ($table === 'users' && array_key_exists('role', $out)) {
+            $role = (string) $out['role'];
+            $allowedRoles = ['Admin', 'Manager', 'Accountant', 'Steward', 'Staff'];
+            if (! in_array($role, $allowedRoles, true)) {
+                throw new \InvalidArgumentException('Invalid user role');
+            }
+        }
+
+        if (array_key_exists('password', $out) && $out['password'] !== null && $out['password'] !== '') {
+            $plain = (string) $out['password'];
+            if (! Hash::isHashed($plain)) {
+                $out['password'] = Hash::make($plain);
+            }
+        } elseif (array_key_exists('password', $out) && ($out['password'] === null || $out['password'] === '')) {
+            unset($out['password']);
         }
 
         if ($table === 'system_settings') {
@@ -610,6 +732,8 @@ class RestQueryController extends Controller
     /** @param array<string, mixed> $row */
     private function decodeRow(string $table, array $row): array
     {
+        unset($row['password']);
+
         foreach ($this->jsonColumns[$table] ?? [] as $col) {
             if (! array_key_exists($col, $row)) {
                 continue;
@@ -641,7 +765,7 @@ class RestQueryController extends Controller
         }
 
         foreach ($row as $key => $value) {
-            if (is_numeric($value) && ! is_bool($value) && ! str_contains((string) $key, 'phone') && ! str_contains((string) $key, 'code') && $key !== 'billNumber' && $key !== 'bill_number' && $key !== 'reference_no' && $key !== 'po_number' && $key !== 'quotation_number' && $key !== 'invoice_number' && $key !== 'empNo' && $key !== 'username' && $key !== 'password' && $key !== 'id' && $key !== 'key' && $key !== 'value') {
+            if (is_numeric($value) && ! is_bool($value) && ! str_contains((string) $key, 'phone') && ! str_contains((string) $key, 'code') && $key !== 'billNumber' && $key !== 'bill_number' && $key !== 'reference_no' && $key !== 'po_number' && $key !== 'quotation_number' && $key !== 'invoice_number' && $key !== 'empNo' && $key !== 'username' && $key !== 'id' && $key !== 'key' && $key !== 'value') {
                 // Keep money/qty numeric for the SPA; leave ids/codes as strings when already string.
                 if (is_string($value) && preg_match('/^-?\d+(\.\d+)?$/', $value)) {
                     $row[$key] = str_contains($value, '.') ? (float) $value : (int) $value;
