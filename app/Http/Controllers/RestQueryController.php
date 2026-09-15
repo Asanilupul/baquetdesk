@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Support\CompanySubscription;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -104,6 +105,12 @@ class RestQueryController extends Controller
                 && in_array($action, ['select'], true)
                 && $companyId === '';
 
+            if ($companyId !== '' && ! $skipCompanyScope) {
+                if ($deny = $this->denyIfCompanyUnusable($companyId)) {
+                    return $deny;
+                }
+            }
+
             $result = match ($action) {
                 'select' => $this->runSelect($table, $select, $filters, $order, $limit, $single, $maybeSingle, $skipCompanyScope ? '' : $companyId),
                 'insert' => $this->runInsert($table, $payload, $returnRows || $single || $maybeSingle, $single, $maybeSingle, $companyId),
@@ -112,6 +119,15 @@ class RestQueryController extends Controller
                 'upsert' => $this->runUpsert($table, $payload, $onConflict, $returnRows || $single || $maybeSingle, $single, $maybeSingle, $companyId),
                 default => throw new \InvalidArgumentException("Unsupported action: {$action}"),
             };
+
+            if ($action === 'select' && $table === 'users' && $skipCompanyScope) {
+                if (! (is_array($result) && array_key_exists('__error', $result))) {
+                    $blocked = $this->blockUnusableCompanyLogin($result, $single || $maybeSingle);
+                    if ($blocked !== null) {
+                        return $blocked;
+                    }
+                }
+            }
 
             if (is_array($result) && array_key_exists('__error', $result)) {
                 return response()->json([
@@ -136,6 +152,12 @@ class RestQueryController extends Controller
             $attendanceStart = (string) $request->input('attendance_start', '');
             $attendanceEnd = (string) $request->input('attendance_end', '');
             $companyId = $this->resolveCompanyId($request);
+
+            if ($companyId !== '') {
+                if ($deny = $this->denyIfCompanyUnusable($companyId)) {
+                    return $deny;
+                }
+            }
 
             $payload = [];
             foreach ($this->allowedTables as $table) {
@@ -227,6 +249,67 @@ class RestQueryController extends Controller
         $id = trim((string) ($request->header('X-Company-Id') ?: $request->input('company_id', '')));
 
         return $id;
+    }
+
+    private function denyIfCompanyUnusable(string $companyId): ?JsonResponse
+    {
+        if (! Schema::hasTable('companies') || ! Schema::hasColumn('companies', 'subscription_status')) {
+            return null;
+        }
+
+        $company = DB::table('companies')->where('id', $companyId)->first();
+        if (! $company) {
+            return response()->json([
+                'data' => null,
+                'error' => ['message' => 'Company not found'],
+            ], 404);
+        }
+
+        if (CompanySubscription::isUsable($company)) {
+            return null;
+        }
+
+        return response()->json([
+            'data' => null,
+            'error' => ['message' => CompanySubscription::denyMessage($company)],
+        ], 403);
+    }
+
+    private function blockUnusableCompanyLogin(mixed $result, bool $single): ?JsonResponse
+    {
+        $user = null;
+        if ($single && is_array($result)) {
+            $user = $result;
+        } elseif (is_array($result) && isset($result[0]) && is_array($result[0])) {
+            $user = $result[0];
+        }
+
+        if (! is_array($user)) {
+            return null;
+        }
+
+        // SuperAdmin may log in via users table without company scope
+        if (($user['role'] ?? '') === 'SuperAdmin') {
+            return response()->json([
+                'data' => null,
+                'error' => ['message' => 'Use /su-admin for Super Admin login'],
+            ], 403);
+        }
+
+        $companyId = trim((string) ($user['company_id'] ?? ''));
+        if ($companyId === '' || ! Schema::hasTable('companies')) {
+            return null;
+        }
+
+        $company = DB::table('companies')->where('id', $companyId)->first();
+        if (CompanySubscription::isUsable($company)) {
+            return null;
+        }
+
+        return response()->json([
+            'data' => null,
+            'error' => ['message' => CompanySubscription::denyMessage($company)],
+        ], 403);
     }
 
     private function applyCompanyScope($query, string $table, string $companyId): void

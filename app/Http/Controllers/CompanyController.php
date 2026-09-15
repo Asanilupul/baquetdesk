@@ -48,7 +48,7 @@ class CompanyController extends Controller
                 $companyId = (string) Str::uuid();
                 $userId = (string) Str::uuid();
 
-                DB::table('companies')->insert([
+                $companyRow = [
                     'id' => $companyId,
                     'name' => $companyName,
                     'subtitle' => $subtitle,
@@ -59,7 +59,14 @@ class CompanyController extends Controller
                     'status' => 'Active',
                     'created_at' => $now,
                     'updated_at' => $now,
-                ]);
+                ];
+                if (Schema::hasColumn('companies', 'subscription_plan')) {
+                    $companyRow['subscription_plan'] = null;
+                    $companyRow['subscription_expires_at'] = null;
+                    $companyRow['subscription_status'] = 'Pending';
+                }
+
+                DB::table('companies')->insert($companyRow);
 
                 DB::table('users')->insert([
                     'id' => $userId,
@@ -82,6 +89,9 @@ class CompanyController extends Controller
                         'email' => $email,
                         'address' => $address,
                         'status' => 'Active',
+                        'subscription_status' => 'Pending',
+                        'subscription_plan' => null,
+                        'subscription_expires_at' => null,
                     ],
                     'user' => [
                         'id' => $userId,
@@ -89,6 +99,7 @@ class CompanyController extends Controller
                         'role' => 'Admin',
                         'company_id' => $companyId,
                     ],
+                    'message' => 'Company registered. A Super Admin must activate a subscription before you can log in.',
                 ];
             });
 

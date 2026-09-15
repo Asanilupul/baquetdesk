@@ -3,6 +3,7 @@
 use App\Http\Controllers\BackupController;
 use App\Http\Controllers\CompanyController;
 use App\Http\Controllers\RestQueryController;
+use App\Http\Controllers\SuperAdminController;
 use Illuminate\Support\Facades\Route;
 
 Route::post('/db/query', [RestQueryController::class, 'handle']);
@@ -11,6 +12,10 @@ Route::match(['get', 'post'], '/db/bootstrap', [RestQueryController::class, 'boo
 Route::post('/company/register', [CompanyController::class, 'register']);
 Route::get('/company/{id}', [CompanyController::class, 'show']);
 Route::post('/company/{id}', [CompanyController::class, 'update']);
+
+Route::post('/su/login', [SuperAdminController::class, 'login']);
+Route::get('/su/companies', [SuperAdminController::class, 'companies']);
+Route::post('/su/companies/{id}/subscription', [SuperAdminController::class, 'updateSubscription']);
 
 Route::get('/backup/status', [BackupController::class, 'status']);
 Route::post('/backup/settings', [BackupController::class, 'saveSettings']);

@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BanquetDesk Super Admin</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;800&display=swap');
+        body { font-family: 'Plus Jakarta Sans', sans-serif; }
+    </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen">
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect } = React;
+const TOKEN_KEY = 'banquetdesk_su_token';
+
+async function api(path, { method = 'GET', body, token } = {}) {
+    const headers = { 'Content-Type': 'application/json', Accept: 'application/json' };
+    if (token) headers['X-SU-Token'] = token;
+    const res = await fetch(path, {
+        method,
+        headers,
+        body: body ? JSON.stringify(body) : undefined,
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok || json.error) {
+        throw new Error(json?.error?.message || `Request failed (${res.status})`);
+    }
+    return json.data;
+}
+
+function planLabel(plan) {
+    if (plan === '1_month') return '1 Month';
+    if (plan === '12_months') return '12 Months';
+    if (plan === 'lifetime') return 'Lifetime';
+    return plan || '—';
+}
+
+function statusClass(status) {
+    if (status === 'Active') return 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30';
+    if (status === 'Expired') return 'bg-rose-500/15 text-rose-300 border-rose-500/30';
+    return 'bg-amber-500/15 text-amber-300 border-amber-500/30';
+}
+
+function App() {
+    const [token, setToken] = useState(() => localStorage.getItem(TOKEN_KEY) || '');
+    const [user, setUser] = useState(null);
+    const [username, setUsername] = useState('suadmin');
+    const [password, setPassword] = useState('');
+    const [companies, setCompanies] = useState([]);
+    const [error, setError] = useState('');
+    const [loading, setLoading] = useState(false);
+    const [busyId, setBusyId] = useState('');
+
+    const loadCompanies = async (tok = token) => {
+        const data = await api('/api/su/companies', { token: tok });
+        setCompanies(data || []);
+    };
+
+    useEffect(() => {
+        if (!token) return;
+        setLoading(true);
+        loadCompanies(token)
+            .then(() => setUser({ username: 'SuperAdmin' }))
+            .catch((e) => {
+                localStorage.removeItem(TOKEN_KEY);
+                setToken('');
+                setError(e.message);
+            })
+            .finally(() => setLoading(false));
+    }, []);
+
+    const handleLogin = async (e) => {
+        e.preventDefault();
+        setError('');
+        setLoading(true);
+        try {
+            const data = await api('/api/su/login', {
+                method: 'POST',
+                body: { username, password },
+            });
+            localStorage.setItem(TOKEN_KEY, data.token);
+            setToken(data.token);
+            setUser(data.user);
+            await loadCompanies(data.token);
+        } catch (err) {
+            setError(err.message || String(err));
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const logout = () => {
+        localStorage.removeItem(TOKEN_KEY);
+        setToken('');
+        setUser(null);
+        setCompanies([]);
+    };
+
+    const setPlan = async (companyId, plan) => {
+        setBusyId(companyId + plan);
+        setError('');
+        try {
+            await api(`/api/su/companies/${companyId}/subscription`, {
+                method: 'POST',
+                token,
+                body: { plan },
+            });
+            await loadCompanies();
+        } catch (err) {
+            setError(err.message || String(err));
+        } finally {
+            setBusyId('');
+        }
+    };
+
+    if (!token) {
+        return (
+            <div className="min-h-screen flex items-center justify-center p-6">
+                <form onSubmit={handleLogin} className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-[28px] p-8 shadow-2xl space-y-5">
+                    <div>
+                        <p className="text-[10px] font-black uppercase tracking-[0.2em] text-indigo-400">Developer</p>
+                        <h1 className="text-2xl font-black tracking-tight mt-1">Super Admin</h1>
+                        <p className="text-sm text-slate-400 mt-2">Manage company subscriptions for BanquetDesk.</p>
+                    </div>
+                    <div>
+                        <label className="text-[10px] font-black uppercase text-slate-500 ml-1">Username</label>
+                        <input value={username} onChange={e => setUsername(e.target.value)} className="w-full mt-1 p-3.5 rounded-2xl bg-slate-950 border border-slate-700 outline-none focus:border-indigo-500 font-bold text-sm" />
+                    </div>
+                    <div>
+                        <label className="text-[10px] font-black uppercase text-slate-500 ml-1">Password</label>
+                        <input type="password" value={password} onChange={e => setPassword(e.target.value)} className="w-full mt-1 p-3.5 rounded-2xl bg-slate-950 border border-slate-700 outline-none focus:border-indigo-500 font-bold text-sm" />
+                    </div>
+                    {error && <p className="text-rose-400 text-xs font-bold bg-rose-500/10 border border-rose-500/20 rounded-xl p-3">{error}</p>}
+                    <button disabled={loading} className="w-full py-3.5 rounded-2xl bg-indigo-600 hover:bg-indigo-500 font-black uppercase text-xs tracking-wider disabled:opacity-60">
+                        {loading ? 'Signing in…' : 'Login'}
+                    </button>
+                    <a href="/" className="block text-center text-xs text-slate-500 hover:text-slate-300">← Back to BanquetDesk</a>
+                </form>
+            </div>
+        );
+    }
+
+    return (
+        <div className="max-w-6xl mx-auto p-6 lg:p-10 space-y-6">
+            <header className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                <div>
+                    <p className="text-[10px] font-black uppercase tracking-[0.2em] text-indigo-400">BanquetDesk</p>
+                    <h1 className="text-3xl font-black tracking-tight">Subscription Control</h1>
+                    <p className="text-sm text-slate-400 mt-1">Activate, renew, or set lifetime access for registered companies.</p>
+                </div>
+                <div className="flex gap-3">
+                    <button onClick={() => loadCompanies()} className="px-4 py-2 rounded-xl bg-slate-800 border border-slate-700 text-xs font-black uppercase">Refresh</button>
+                    <button onClick={logout} className="px-4 py-2 rounded-xl bg-rose-600/20 border border-rose-500/30 text-rose-300 text-xs font-black uppercase">Logout</button>
+                </div>
+            </header>
+
+            {error && <p className="text-rose-300 text-sm font-bold bg-rose-500/10 border border-rose-500/20 rounded-2xl p-4">{error}</p>}
+
+            <div className="overflow-x-auto rounded-[28px] border border-slate-800 bg-slate-900/70">
+                <table className="w-full text-left text-sm">
+                    <thead className="text-[10px] uppercase tracking-wider text-slate-500 border-b border-slate-800">
+                        <tr>
+                            <th className="p-4">Company</th>
+                            <th className="p-4">Admin</th>
+                            <th className="p-4">Status</th>
+                            <th className="p-4">Plan</th>
+                            <th className="p-4">Expires</th>
+                            <th className="p-4">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {companies.length === 0 && (
+                            <tr><td colSpan="6" className="p-8 text-center text-slate-500">No companies yet.</td></tr>
+                        )}
+                        {companies.map((c) => (
+                            <tr key={c.id} className="border-b border-slate-800/80 align-top">
+                                <td className="p-4">
+                                    <div className="font-black text-slate-100">{c.name}</div>
+                                    <div className="text-xs text-slate-500 mt-1">{c.email || c.phone || c.id}</div>
+                                </td>
+                                <td className="p-4 font-bold text-slate-300">{c.admin_username || '—'}</td>
+                                <td className="p-4">
+                                    <span className={`inline-flex px-2.5 py-1 rounded-full border text-[10px] font-black uppercase ${statusClass(c.subscription_status)}`}>
+                                        {c.subscription_status || 'Pending'}
+                                    </span>
+                                </td>
+                                <td className="p-4 font-bold">{planLabel(c.subscription_plan)}</td>
+                                <td className="p-4 text-slate-400">
+                                    {c.subscription_plan === 'lifetime' ? 'Never' : (c.subscription_expires_at ? String(c.subscription_expires_at).replace('T', ' ').slice(0, 19) : '—')}
+                                </td>
+                                <td className="p-4">
+                                    <div className="flex flex-wrap gap-2">
+                                        {[
+                                            ['1_month', '1 Month'],
+                                            ['12_months', '12 Months'],
+                                            ['lifetime', 'Lifetime'],
+                                        ].map(([plan, label]) => (
+                                            <button
+                                                key={plan}
+                                                disabled={!!busyId}
+                                                onClick={() => setPlan(c.id, plan)}
+                                                className="px-3 py-2 rounded-xl bg-indigo-600/20 hover:bg-indigo-600/35 border border-indigo-500/30 text-[10px] font-black uppercase disabled:opacity-50"
+                                            >
+                                                {busyId === c.id + plan ? '…' : label}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </td>
+                            </tr>
+                        ))}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>

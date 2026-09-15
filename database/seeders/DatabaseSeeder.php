@@ -46,6 +46,25 @@ class DatabaseSeeder extends Seeder
             'updated_at' => $now,
         ]);
 
+        // Developer Super Admin (no company scope)
+        $suPayload = [
+            'username' => 'suadmin',
+            'password' => 'SuAdmin@2026',
+            'role' => 'SuperAdmin',
+            'updated_at' => $now,
+        ];
+        if (Schema::hasColumn('users', 'company_id')) {
+            $suPayload['company_id'] = null;
+        }
+        $existingSu = DB::table('users')->where('username', 'suadmin')->first();
+        if ($existingSu) {
+            DB::table('users')->where('username', 'suadmin')->update($suPayload);
+        } else {
+            DB::table('users')->insert(array_merge($suPayload, [
+                'id' => (string) Str::uuid(),
+                'created_at' => $now,
+            ]));
+        }
         $employees = [
             'Madusanka', 'Nissanka', 'Eranda', 'Imesha', 'Bhagya',
             'Asanga', 'Jalani', 'Hettiarachchi', 'Senarathne',
