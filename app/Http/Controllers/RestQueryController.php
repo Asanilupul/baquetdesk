@@ -2,12 +2,15 @@
 
 namespace App\Http\Controllers;
 
+use App\Support\ComboPricing;
 use App\Support\CompanyApiSession;
 use App\Support\CompanySubscription;
+use App\Support\PaymentLedger;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use Throwable;
@@ -225,6 +228,7 @@ class RestQueryController extends Controller
             }
 
             $payload = [];
+            $bootstrapErrors = [];
             foreach ($this->allowedTables as $table) {
                 if ($table === 'attendance' || $table === 'system_settings') {
                     continue;
@@ -242,7 +246,16 @@ class RestQueryController extends Controller
                         ->all();
                 } catch (Throwable $e) {
                     $payload[$table] = [];
+                    $bootstrapErrors[$table] = $e->getMessage();
+                    Log::warning('Bootstrap table failed', [
+                        'table' => $table,
+                        'company_id' => $companyId,
+                        'error' => $e->getMessage(),
+                    ]);
                 }
+            }
+            if ($bootstrapErrors !== []) {
+                $payload['_bootstrap_errors'] = $bootstrapErrors;
             }
 
             // Branding: prefer companies table, fall back to system_settings
@@ -464,10 +477,15 @@ class RestQueryController extends Controller
             if ($companyId !== '' && Schema::hasColumn($table, 'company_id')) {
                 $row['company_id'] = $companyId;
             }
+            $row = $this->applyDomainWriteHooks($table, $row, $companyId, true);
             $prepared[] = $this->prepareWriteRow($table, $row, true);
         }
 
         DB::table($table)->insert($prepared);
+
+        foreach ($prepared as $row) {
+            $this->afterDomainWrite($table, $this->decodeRow($table, $row), $companyId, 'insert');
+        }
 
         if (! $returnRows) {
             return null;
@@ -495,16 +513,22 @@ class RestQueryController extends Controller
         $this->applyCompanyScope($query, $table, $companyId);
         $this->applyFilters($query, $filters, $table);
 
+        $payload = $this->applyDomainWriteHooks($table, is_array($payload) ? $payload : [], $companyId, false);
         $update = $this->prepareWriteRow($table, $payload, false);
         unset($update['id'], $update['key'], $update['company_id']);
 
-        if ($table !== 'system_settings') {
-            $update['updated_at'] = now();
-        } else {
-            $update['updated_at'] = now();
-        }
+        $update['updated_at'] = now();
 
         $query->update($update);
+
+        if ($table === 'payments') {
+            $fresh = DB::table($table);
+            $this->applyCompanyScope($fresh, $table, $companyId);
+            $this->applyFilters($fresh, $filters, $table);
+            foreach ($fresh->get() as $row) {
+                $this->afterDomainWrite($table, $this->decodeRow($table, (array) $row), $companyId, 'update');
+            }
+        }
 
         if (! $returnRows) {
             return null;
@@ -523,9 +547,91 @@ class RestQueryController extends Controller
         $query = DB::table($table);
         $this->applyCompanyScope($query, $table, $companyId);
         $this->applyFilters($query, $filters, $table);
+
+        $toDelete = [];
+        if ($table === 'payments') {
+            $toDelete = $query->get()->map(fn ($row) => $this->decodeRow($table, (array) $row))->all();
+        }
+
         $query->delete();
 
+        foreach ($toDelete as $row) {
+            $this->afterDomainWrite($table, $row, $companyId, 'delete');
+        }
+
         return null;
+    }
+
+    /**
+     * @param  array<string, mixed>  $row
+     * @return array<string, mixed>
+     */
+    private function applyDomainWriteHooks(string $table, array $row, string $companyId, bool $isInsert): array
+    {
+        if ($table === 'combo_packages') {
+            $decoded = $row;
+            if (isset($decoded['menu_options']) && is_string($decoded['menu_options'])) {
+                $decoded['menu_options'] = json_decode($decoded['menu_options'], true) ?: [];
+            }
+            foreach (['vendor_package_ids', 'bite_lines', 'softdrink_lines'] as $jsonKey) {
+                if (isset($decoded[$jsonKey]) && is_string($decoded[$jsonKey])) {
+                    $decoded[$jsonKey] = json_decode($decoded[$jsonKey], true) ?: [];
+                }
+            }
+            $normalized = ComboPricing::normalizeCombo($decoded);
+            $row['menu_options'] = $normalized['menu_options'] ?? [];
+
+            return $row;
+        }
+
+        if ($table === 'functions' && (! empty($row['combo_package_id']) || ($row['package_source'] ?? '') === 'combo')) {
+            $comboId = (string) ($row['combo_package_id'] ?? '');
+            $combo = null;
+            if ($comboId !== '' && Schema::hasTable('combo_packages')) {
+                $cq = DB::table('combo_packages')->where('id', $comboId);
+                if ($companyId !== '' && Schema::hasColumn('combo_packages', 'company_id')) {
+                    $cq->where('company_id', $companyId);
+                }
+                $found = $cq->first();
+                if ($found) {
+                    $combo = $this->decodeRow('combo_packages', (array) $found);
+                }
+            }
+            if (isset($row['pricing_snapshot']) && is_string($row['pricing_snapshot'])) {
+                $row['pricing_snapshot'] = json_decode($row['pricing_snapshot'], true) ?: [];
+            }
+            if (isset($row['optional_vendor_extras']) && is_string($row['optional_vendor_extras'])) {
+                $row['optional_vendor_extras'] = json_decode($row['optional_vendor_extras'], true) ?: [];
+            }
+
+            return ComboPricing::lockFunctionSnapshot($row, $combo);
+        }
+
+        return $row;
+    }
+
+    /**
+     * @param  array<string, mixed>  $row
+     */
+    private function afterDomainWrite(string $table, array $row, string $companyId, string $action): void
+    {
+        if ($table !== 'payments' || $companyId === '') {
+            return;
+        }
+
+        try {
+            if ($action === 'delete') {
+                PaymentLedger::void($companyId, (string) ($row['id'] ?? ''));
+            } else {
+                PaymentLedger::sync($companyId, $row);
+            }
+        } catch (Throwable $e) {
+            Log::warning('Payment ledger sync failed', [
+                'payment_id' => $row['id'] ?? null,
+                'action' => $action,
+                'error' => $e->getMessage(),
+            ]);
+        }
     }
 
     private function runUpsert(
@@ -545,6 +651,7 @@ class RestQueryController extends Controller
             if ($companyId !== '' && Schema::hasColumn($table, 'company_id')) {
                 $row['company_id'] = $companyId;
             }
+            $row = $this->applyDomainWriteHooks($table, $row, $companyId, true);
             $prepared = $this->prepareWriteRow($table, $row, true);
             $match = [];
 
@@ -580,10 +687,14 @@ class RestQueryController extends Controller
                 foreach ($match as $col => $val) {
                     $fresh->where($col, $val);
                 }
-                $saved[] = $this->decodeRow($table, (array) $fresh->first());
+                $decoded = $this->decodeRow($table, (array) $fresh->first());
+                $this->afterDomainWrite($table, $decoded, $companyId, 'update');
+                $saved[] = $decoded;
             } else {
                 DB::table($table)->insert($prepared);
-                $saved[] = $this->decodeRow($table, $prepared);
+                $decoded = $this->decodeRow($table, $prepared);
+                $this->afterDomainWrite($table, $decoded, $companyId, 'insert');
+                $saved[] = $decoded;
             }
         }
 

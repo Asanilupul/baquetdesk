@@ -186,6 +186,7 @@ class CompanyController extends Controller
             ['1000', 'Cash on Hand', 'Asset', 'Cash on hand'],
             ['1050', 'Bank Account', 'Asset', 'Bank'],
             ['2000', 'Accounts Payable (A/P)', 'Liability', 'Accounts Payable (A/P)'],
+            ['2300', 'Customer Deposits', 'Liability', 'Other Current Liabilities'],
             ['3000', 'Opening Balance Equity', 'Equity', 'Opening Balance Equity'],
             ['4000', 'Catering Sales', 'Revenue', 'Service/Fee Income'],
             ['5000', 'Advertising & Marketing', 'Expense', 'Advertising/Promotional'],
