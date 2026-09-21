@@ -68,7 +68,8 @@ class RestQueryController extends Controller
         'vendor_packages' => ['categories'],
         'function_sheets' => ['sheet_data'],
         'production_balancing' => ['in_store_items', 'processing_items', 'daily_sales'],
-        'combo_packages' => ['vendor_package_ids', 'bite_lines', 'softdrink_lines'],
+        'combo_packages' => ['vendor_package_ids', 'bite_lines', 'softdrink_lines', 'menu_options'],
+        'functions' => ['pricing_snapshot', 'optional_vendor_extras'],
     ];
 
     /** @var array<string, list<string>> */
