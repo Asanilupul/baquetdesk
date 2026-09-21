@@ -200,8 +200,15 @@
     const included = includedLabels(option, catalogs);
     const optLines = [];
     let optionalTotal = 0;
+    const includedBiteIds = new Set((opt.bite_lines || []).map((l) => String(l.extra_id)));
+    const includedDrinkIds = new Set((opt.softdrink_lines || []).map((l) => String(l.extra_id)));
+    const includedVendorIds = new Set((opt.vendor_package_ids || []).map((id) => String(id)));
     (optionalExtras || []).forEach((ex) => {
       const kind = ex.kind || "bite";
+      const id = String(ex.id || "");
+      if (kind === "bite" && includedBiteIds.has(id)) return;
+      if (kind === "softdrink" && includedDrinkIds.has(id)) return;
+      if (kind === "vendor" && includedVendorIds.has(id)) return;
       const qty = kind === "vendor" ? 1 : num(ex.quantity, 1);
       const rate = num(ex.unit_price);
       const lineTotal = qty * rate;
