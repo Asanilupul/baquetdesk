@@ -82,6 +82,15 @@
             -webkit-user-select: none;
         }
 
+        /* Lucide icons must inherit button color and stay visible */
+        .lucide,
+        span.inline-flex > svg {
+            display: inline-block;
+            vertical-align: middle;
+            stroke: currentColor;
+            fill: none;
+        }
+
         .boot-splash {
             min-height: 100vh;
             display: flex;
