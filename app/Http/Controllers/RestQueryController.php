@@ -61,7 +61,7 @@ class RestQueryController extends Controller
     /** @var array<string, list<string>> */
     private array $jsonColumns = [
         'quotations' => ['items'],
-        'invoices' => ['items'],
+        'invoices' => ['items', 'client_reference'],
         'purchase_orders' => ['items'],
         'kitchen_sheets' => ['selected_items', 'bites', 'soft_drinks'],
         'vendors' => ['pictures', 'packages'],
