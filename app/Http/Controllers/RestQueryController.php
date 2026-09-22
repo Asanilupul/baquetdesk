@@ -48,6 +48,8 @@ class RestQueryController extends Controller
         'halls' => ['column' => 'name', 'ascending' => true],
         'menu_extras' => ['column' => 'name', 'ascending' => true],
         'combo_packages' => ['column' => 'name', 'ascending' => true],
+        'payroll_runs' => ['column' => 'period', 'ascending' => false],
+        'payroll_slips' => ['column' => 'run_id', 'ascending' => false],
     ];
 
     /** @var list<string> */
@@ -60,6 +62,7 @@ class RestQueryController extends Controller
         'store_items', 'item_recipes', 'store_transactions', 'vendors', 'vendor_categories',
         'vendor_packages', 'accounts_coa', 'journal_entries', 'expense_entries', 'function_sheets',
         'system_settings', 'production_balancing', 'halls', 'menu_extras', 'combo_packages', 'companies',
+        'payroll_runs', 'payroll_slips',
     ];
 
     /** @var array<string, list<string>> */
@@ -75,6 +78,8 @@ class RestQueryController extends Controller
         'production_balancing' => ['in_store_items', 'processing_items', 'daily_sales'],
         'combo_packages' => ['vendor_package_ids', 'bite_lines', 'softdrink_lines', 'menu_options'],
         'functions' => ['pricing_snapshot', 'optional_vendor_extras'],
+        'payroll_runs' => ['totals'],
+        'payroll_slips' => ['employee_snapshot', 'components'],
     ];
 
     /** @var array<string, list<string>> */
@@ -83,6 +88,7 @@ class RestQueryController extends Controller
         'advance_requests' => ['is_paid', 'is_reconciled'],
         'payments' => ['is_reconciled', 'is_refunded'],
         'accounts_coa' => ['is_active'],
+        'employees' => ['is_epf_employee'],
     ];
 
     public function handle(Request $request): JsonResponse

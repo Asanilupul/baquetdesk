@@ -792,7 +792,7 @@ class BackupService
             'kitchen_sheets', 'store_items', 'item_recipes', 'store_transactions', 'vendors',
             'vendor_categories', 'vendor_packages', 'accounts_coa', 'journal_entries', 'expense_entries',
             'function_sheets', 'system_settings', 'production_balancing', 'halls', 'menu_extras',
-            'combo_packages',
+            'combo_packages', 'payroll_runs', 'payroll_slips',
         ];
     }
 
