@@ -29,3 +29,6 @@ Thumbs.db
 bacup/
 baquetdesk/
 
+
+/composer.phar
+/composer-setup.php
