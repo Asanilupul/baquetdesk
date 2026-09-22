@@ -116,6 +116,8 @@ class DatabaseSeeder extends Seeder
             'invoice_header' => 'Invoice',
             'invoice_footer' => 'Thank you for your business',
             'invoice_watermark' => 'INVOICE',
+            'advance_agreement_title' => 'Service Agreement & Terms and Conditions',
+            'advance_agreement_terms' => "1. This Advance Payment Invoice confirms receipt of the advance payment toward the booked function/event.\n2. The advance amount forms part of the total function charges and will be deducted from the final invoice.\n3. The booking is confirmed only upon receipt of this advance, as agreed with the company.\n4. Cancellations, postponements, and menu or venue changes are subject to the company cancellation and revision policy.\n5. Any remaining balance must be settled as per the agreed payment schedule before or on the function date, unless otherwise agreed in writing.\n6. The company may adjust charges if guest count (pax), menu, hall, or extras change after this agreement.\n7. The customer is responsible for providing accurate event details and for damages caused by their guests to company property.\n8. By signing below, the customer confirms they have read, understood, and agree to these Terms and Conditions.",
             'payroll_header' => 'Payroll Department',
             'payroll_footer' => 'This is a computer generated document and does not require a signature.',
             'payroll_watermark' => 'PAYSLIP',
