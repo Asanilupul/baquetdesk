@@ -64,6 +64,7 @@ class RestQueryController extends Controller
 
     /** @var array<string, list<string>> */
     private array $jsonColumns = [
+        'users' => ['allowed_modules'],
         'quotations' => ['items'],
         'invoices' => ['items', 'client_reference'],
         'purchase_orders' => ['items'],
@@ -145,16 +146,16 @@ class RestQueryController extends Controller
                 }
             }
 
-            // Only Admins may create/change user roles
+            // Only Admins may create/change user roles or module access
             if ($table === 'users' && in_array($action, ['insert', 'update', 'upsert'], true)) {
                 $actorRole = $session['role'] ?? '';
                 if ($actorRole !== 'Admin') {
                     $payloadRows = is_array($payload) ? (array_is_list($payload) ? $payload : [$payload]) : [];
                     foreach ($payloadRows as $row) {
-                        if (is_array($row) && array_key_exists('role', $row)) {
+                        if (is_array($row) && (array_key_exists('role', $row) || array_key_exists('allowed_modules', $row))) {
                             return response()->json([
                                 'data' => null,
-                                'error' => ['message' => 'Only Admins can manage user roles'],
+                                'error' => ['message' => 'Only Admins can manage user roles and module access'],
                             ], 403);
                         }
                     }
