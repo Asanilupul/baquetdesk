@@ -946,7 +946,8 @@ class RestQueryController extends Controller
                 $decoded = json_decode($row[$col], true);
                 $row[$col] = $decoded === null ? $row[$col] : $decoded;
             } elseif ($row[$col] === null) {
-                $row[$col] = [];
+                // allowed_modules: null means unrestricted access (do not coerce to []).
+                $row[$col] = $col === 'allowed_modules' ? null : [];
             }
         }
 

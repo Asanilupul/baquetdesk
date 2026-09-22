@@ -127,6 +127,37 @@ class AuthController extends Controller
         $arr = (array) $row;
         unset($arr['password']);
 
+        // JSON columns come back as strings from the DB driver; the SPA expects
+        // allowed_modules to be null (full access) or a real array of module ids.
+        if (array_key_exists('allowed_modules', $arr)) {
+            $arr['allowed_modules'] = $this->decodeAllowedModules($arr['allowed_modules']);
+        }
+
         return $arr;
+    }
+
+    private function decodeAllowedModules(mixed $value): ?array
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        if (is_array($value)) {
+            return array_values(array_map('strval', $value));
+        }
+
+        if (is_string($value)) {
+            $decoded = json_decode($value, true);
+            if (json_last_error() === JSON_ERROR_NONE) {
+                if ($decoded === null) {
+                    return null;
+                }
+                if (is_array($decoded)) {
+                    return array_values(array_map('strval', $decoded));
+                }
+            }
+        }
+
+        return null;
     }
 }
