@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Support\LedgerService;
+use App\Support\PaymentLedger;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
@@ -171,5 +172,39 @@ class LedgerServiceTest extends TestCase
 
         $cash = DB::table('accounts_coa')->where('id', $this->cashId)->first();
         $this->assertEquals(500.0, (float) $cash->balance);
+    }
+
+    public function test_payment_ledger_posts_cash_and_customer_deposits(): void
+    {
+        $paymentId = (string) Str::uuid();
+        PaymentLedger::sync($this->companyId, [
+            'id' => $paymentId,
+            'bill_amount' => 1200,
+            'bill_date' => '2026-09-22',
+            'bill_number' => 'B-1',
+            'payment_type' => 'Advance',
+        ]);
+
+        $cash = DB::table('accounts_coa')
+            ->where('company_id', $this->companyId)
+            ->where('account_code', PaymentLedger::CASH_CODE)
+            ->first();
+        $deposit = DB::table('accounts_coa')
+            ->where('company_id', $this->companyId)
+            ->where('account_code', PaymentLedger::DEPOSIT_CODE)
+            ->first();
+
+        $this->assertNotNull($cash);
+        $this->assertNotNull($deposit);
+        $this->assertEquals(1200.0, (float) $cash->balance);
+        $this->assertEquals(1200.0, (float) $deposit->balance);
+
+        $voucher = DB::table('journal_vouchers')
+            ->where('reference_no', PaymentLedger::referenceFor($paymentId))
+            ->where('status', 'posted')
+            ->first();
+        $this->assertNotNull($voucher);
+        $this->assertEquals(1200.0, (float) $voucher->total_debit);
+        $this->assertEquals(1200.0, (float) $voucher->total_credit);
     }
 }

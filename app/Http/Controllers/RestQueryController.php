@@ -111,6 +111,15 @@ class RestQueryController extends Controller
                 ], 400);
             }
 
+            // Core GL: journal lines/vouchers are write-only via LedgerService actions
+            if (in_array($table, ['journal_entries', 'journal_vouchers'], true)
+                && in_array($action, ['insert', 'update', 'delete', 'upsert'], true)) {
+                return response()->json([
+                    'data' => null,
+                    'error' => ['message' => 'Use post_journal_voucher or void_journal_voucher. Direct journal writes are not allowed.'],
+                ], 422);
+            }
+
             $companyId = $this->resolveCompanyId($request);
             $filters = $request->input('filters', []);
             $order = $request->input('order');
