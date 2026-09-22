@@ -276,7 +276,7 @@ class BackupService
         if (class_exists(ZipArchive::class)) {
             $filename = "banquetdesk_backup_{$safeCompany}_{$stamp}_{$trigger}.zip";
             $zipPath = $dir.'/'.$filename;
-            $zip = new ZipArchive();
+            $zip = new ZipArchive;
             $opened = $zip->open($zipPath, ZipArchive::CREATE | ZipArchive::OVERWRITE);
             if ($opened === true) {
                 foreach (File::files($tempDir) as $file) {
@@ -700,7 +700,7 @@ class BackupService
     private function extractZipArchive(string $path, string $extractDir): void
     {
         if (class_exists(ZipArchive::class)) {
-            $zip = new ZipArchive();
+            $zip = new ZipArchive;
             if ($zip->open($path) === true) {
                 $zip->extractTo($extractDir);
                 $zip->close();
@@ -790,7 +790,7 @@ class BackupService
             'menu_items', 'menus', 'menu_hall_prices', 'menu_category_configs', 'menu_selections',
             'function_menu_selections', 'menu_addons', 'function_menu_addons', 'function_menu_extras',
             'kitchen_sheets', 'store_items', 'item_recipes', 'store_transactions', 'vendors',
-            'vendor_categories', 'vendor_packages', 'accounts_coa', 'journal_entries', 'expense_entries',
+            'vendor_categories', 'vendor_packages', 'accounts_coa', 'journal_entries', 'expense_entries', 'journal_vouchers',
             'function_sheets', 'system_settings', 'production_balancing', 'halls', 'menu_extras',
             'combo_packages', 'payroll_runs', 'payroll_slips',
         ];

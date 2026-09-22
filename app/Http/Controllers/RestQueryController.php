@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Support\ComboPricing;
 use App\Support\CompanyApiSession;
 use App\Support\CompanySubscription;
+use App\Support\LedgerService;
 use App\Support\PaymentLedger;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -44,6 +45,7 @@ class RestQueryController extends Controller
         'accounts_coa' => ['column' => 'account_code', 'ascending' => true],
         'journal_entries' => ['column' => 'entry_date', 'ascending' => false],
         'expense_entries' => ['column' => 'expense_date', 'ascending' => false],
+        'journal_vouchers' => ['column' => 'voucher_date', 'ascending' => false],
         'invoices' => ['column' => 'created_at', 'ascending' => false],
         'halls' => ['column' => 'name', 'ascending' => true],
         'menu_extras' => ['column' => 'name', 'ascending' => true],
@@ -60,7 +62,7 @@ class RestQueryController extends Controller
         'menu_items', 'menus', 'menu_hall_prices', 'menu_category_configs', 'menu_selections',
         'function_menu_selections', 'menu_addons', 'function_menu_addons', 'function_menu_extras', 'kitchen_sheets',
         'store_items', 'item_recipes', 'store_transactions', 'vendors', 'vendor_categories',
-        'vendor_packages', 'accounts_coa', 'journal_entries', 'expense_entries', 'function_sheets',
+        'vendor_packages', 'accounts_coa', 'journal_entries', 'expense_entries', 'journal_vouchers', 'function_sheets',
         'system_settings', 'production_balancing', 'halls', 'menu_extras', 'combo_packages', 'companies',
         'payroll_runs', 'payroll_slips',
     ];
@@ -94,6 +96,13 @@ class RestQueryController extends Controller
     public function handle(Request $request): JsonResponse
     {
         try {
+            $action = (string) $request->input('action', 'select');
+
+            // Core GL voucher actions (do not require a normal table CRUD path)
+            if (in_array($action, ['post_journal_voucher', 'void_journal_voucher'], true)) {
+                return $this->handleLedgerAction($request, $action);
+            }
+
             $table = (string) $request->input('table', '');
             if (! in_array($table, $this->allowedTables, true)) {
                 return response()->json([
@@ -103,7 +112,6 @@ class RestQueryController extends Controller
             }
 
             $companyId = $this->resolveCompanyId($request);
-            $action = (string) $request->input('action', 'select');
             $filters = $request->input('filters', []);
             $order = $request->input('order');
             $limit = $request->input('limit');
@@ -639,6 +647,69 @@ class RestQueryController extends Controller
                 'action' => $action,
                 'error' => $e->getMessage(),
             ]);
+        }
+    }
+
+    private function handleLedgerAction(Request $request, string $action): JsonResponse
+    {
+        $session = CompanyApiSession::fromRequest($request);
+        if ($session === null) {
+            return response()->json([
+                'data' => null,
+                'error' => ['message' => 'Authentication required. Please log in again.'],
+            ], 401);
+        }
+
+        $companyId = $session['company_id'] !== ''
+            ? $session['company_id']
+            : $this->resolveCompanyId($request);
+
+        if ($companyId === '') {
+            return response()->json([
+                'data' => null,
+                'error' => ['message' => 'Company session required (X-Company-Id).'],
+            ], 401);
+        }
+
+        if ($deny = $this->denyIfCompanyUnusable($companyId)) {
+            return $deny;
+        }
+
+        $payload = $request->input('payload', []);
+        if (! is_array($payload)) {
+            $payload = [];
+        }
+
+        try {
+            if ($action === 'post_journal_voucher') {
+                $header = is_array($payload['header'] ?? null) ? $payload['header'] : $payload;
+                $lines = is_array($payload['lines'] ?? null) ? $payload['lines'] : [];
+                if ($lines === [] && is_array($payload['entries'] ?? null)) {
+                    $lines = $payload['entries'];
+                }
+                if (! isset($header['created_by']) || $header['created_by'] === '') {
+                    $header['created_by'] = $session['username'] ?? $session['user'] ?? 'user';
+                }
+                $result = LedgerService::postVoucher($companyId, $header, $lines);
+
+                return response()->json(['data' => $result, 'error' => null]);
+            }
+
+            $voucherId = (string) ($payload['voucher_id'] ?? $payload['id'] ?? '');
+            if ($voucherId === '') {
+                return response()->json([
+                    'data' => null,
+                    'error' => ['message' => 'voucher_id is required'],
+                ], 400);
+            }
+            $result = LedgerService::voidVoucher($companyId, $voucherId);
+
+            return response()->json(['data' => $result, 'error' => null]);
+        } catch (Throwable $e) {
+            return response()->json([
+                'data' => null,
+                'error' => ['message' => $e->getMessage()],
+            ], 422);
         }
     }
 
