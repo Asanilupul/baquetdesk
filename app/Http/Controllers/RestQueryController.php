@@ -8,6 +8,7 @@ use App\Support\CompanySubscription;
 use App\Support\PaymentLedger;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Log;
@@ -780,11 +781,24 @@ class RestQueryController extends Controller
 
             if (in_array($key, $this->jsonColumns[$table] ?? [], true)) {
                 $out[$key] = is_string($value) ? $value : json_encode($value ?? []);
+
                 continue;
             }
 
             if (in_array($key, $this->boolColumns[$table] ?? [], true)) {
                 $out[$key] = $value ? 1 : 0;
+
+                continue;
+            }
+
+            // MySQL DATETIME rejects ISO-8601 (…T…Z); normalize common client timestamps.
+            if (is_string($value) && preg_match('/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/', $value) === 1) {
+                try {
+                    $out[$key] = Carbon::parse($value)->format('Y-m-d H:i:s');
+                } catch (Throwable) {
+                    $out[$key] = $value;
+                }
+
                 continue;
             }
 
