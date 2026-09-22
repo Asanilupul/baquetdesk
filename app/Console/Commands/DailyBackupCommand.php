@@ -10,7 +10,7 @@ class DailyBackupCommand extends Command
 {
     protected $signature = 'backup:daily {--force : Run even if auto backup is disabled}';
 
-    protected $description = 'Create a daily BanquetDesk backup per company (company-isolated folders)';
+    protected $description = 'Create a daily BanquetDesk backup per company (skips companies already backed up today)';
 
     public function handle(BackupService $backups): int
     {
@@ -24,16 +24,20 @@ class DailyBackupCommand extends Command
             $results = $backups->createBackupForAllCompanies('daily');
             $ok = 0;
             $fail = 0;
+            $skipped = 0;
             foreach ($results as $row) {
                 if (! empty($row['error'])) {
                     $fail++;
                     $this->error(($row['name'] ?? $row['company_id']).': '.$row['error']);
+                } elseif (! empty($row['skipped'])) {
+                    $skipped++;
+                    $this->line(($row['name'] ?? $row['company_id']).': already backed up today');
                 } else {
                     $ok++;
                     $this->info(($row['name'] ?? $row['company_id']).': '.$row['filename'].' ('.$row['size'].' bytes)');
                 }
             }
-            $this->info("Done. Success: {$ok}, Failed: {$fail}");
+            $this->info("Done. Created: {$ok}, Skipped: {$skipped}, Failed: {$fail}");
 
             return $fail > 0 && $ok === 0 ? self::FAILURE : self::SUCCESS;
         } catch (Throwable $e) {

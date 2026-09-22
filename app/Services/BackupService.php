@@ -77,6 +77,62 @@ class BackupService
     }
 
     /**
+     * True when this company already has a successful backup recorded for today (app timezone).
+     */
+    public function hasSuccessfulBackupToday(?string $companyId = null): bool
+    {
+        $companyId = trim((string) $companyId);
+        if ($companyId === '') {
+            return false;
+        }
+
+        $suffix = '_'.$companyId;
+        $lastRun = (string) (DB::table('system_settings')->where('key', 'backup_last_run'.$suffix)->value('value') ?? '');
+        $lastError = (string) (DB::table('system_settings')->where('key', 'backup_last_error'.$suffix)->value('value') ?? '');
+        if ($lastRun !== '' && $lastError === '' && str_starts_with($lastRun, now()->toDateString())) {
+            return true;
+        }
+
+        // Also accept a backup file stamped with today's date in the company folder
+        try {
+            $today = now()->format('Y-m-d');
+            foreach (File::files($this->backupDirectory($companyId)) as $file) {
+                $name = $file->getFilename();
+                if (str_starts_with($name, 'banquetdesk_backup_') && str_contains($name, $today)) {
+                    return true;
+                }
+            }
+        } catch (Throwable $e) {
+            // ignore folder errors — treat as not backed up
+        }
+
+        return false;
+    }
+
+    /**
+     * Create today's backup for a company when auto backup is on and none exists yet.
+     *
+     * @return array{ran: bool, skipped?: bool, reason?: string, result?: array}|null
+     */
+    public function ensureDailyBackup(?string $companyId = null): ?array
+    {
+        $companyId = trim((string) $companyId);
+        if ($companyId === '') {
+            return ['ran' => false, 'skipped' => true, 'reason' => 'missing_company'];
+        }
+        if (! $this->autoEnabled()) {
+            return ['ran' => false, 'skipped' => true, 'reason' => 'auto_disabled'];
+        }
+        if ($this->hasSuccessfulBackupToday($companyId)) {
+            return ['ran' => false, 'skipped' => true, 'reason' => 'already_today'];
+        }
+
+        $result = $this->createBackup('daily', $companyId);
+
+        return ['ran' => true, 'result' => $result];
+    }
+
+    /**
      * @return array{path: string, filename: string, size: int, tables: int, created_at: string, format: string, company_id: string}
      */
     public function createBackup(string $trigger = 'manual', ?string $companyId = null): array
@@ -175,17 +231,31 @@ class BackupService
 
         $results = [];
         foreach (DB::table('companies')->orderBy('created_at')->get(['id', 'name']) as $company) {
+            $companyId = (string) $company->id;
             try {
-                $created = $this->createBackup($trigger, (string) $company->id);
+                // Hourly/daily scheduler: skip companies that already succeeded today
+                if ($trigger === 'daily' && $this->hasSuccessfulBackupToday($companyId)) {
+                    $results[] = [
+                        'company_id' => $companyId,
+                        'name' => (string) ($company->name ?? ''),
+                        'filename' => '(skipped — already backed up today)',
+                        'size' => 0,
+                        'skipped' => true,
+                    ];
+
+                    continue;
+                }
+
+                $created = $this->createBackup($trigger, $companyId);
                 $results[] = [
-                    'company_id' => (string) $company->id,
+                    'company_id' => $companyId,
                     'name' => (string) ($company->name ?? ''),
                     'filename' => $created['filename'],
                     'size' => $created['size'],
                 ];
             } catch (Throwable $e) {
                 $results[] = [
-                    'company_id' => (string) $company->id,
+                    'company_id' => $companyId,
                     'name' => (string) ($company->name ?? ''),
                     'error' => $e->getMessage(),
                 ];
@@ -338,8 +408,12 @@ class BackupService
             'backup_last_trigger_'.$companyId,
         ])->pluck('value', 'key');
 
+        $auto = $this->autoEnabled();
+        $hasToday = $companyId !== '' ? $this->hasSuccessfulBackupToday($companyId) : false;
+        $lastTrigger = $settings['backup_last_trigger_'.$companyId] ?? null;
+
         return [
-            'auto_enabled' => $this->autoEnabled(),
+            'auto_enabled' => $auto,
             'path' => $companyId !== '' ? $this->backupDirectory($companyId) : $this->backupDirectory(),
             'retention_days' => $this->retentionDays(),
             'company_id' => $companyId !== '' ? $companyId : null,
@@ -347,7 +421,10 @@ class BackupService
             'last_file' => $settings['backup_last_file_'.$companyId] ?? null,
             'last_size' => isset($settings['backup_last_size_'.$companyId]) ? (int) $settings['backup_last_size_'.$companyId] : null,
             'last_error' => $settings['backup_last_error_'.$companyId] ?? null,
-            'last_trigger' => $settings['backup_last_trigger_'.$companyId] ?? null,
+            'last_trigger' => $lastTrigger,
+            'backed_up_today' => $hasToday,
+            'needs_daily' => $auto && $companyId !== '' && ! $hasToday,
+            'scheduler_hint' => 'Server cron must run: * * * * * php artisan schedule:run',
             'files' => $this->listBackups(10, $companyId !== '' ? $companyId : null),
             'zip_available' => class_exists(ZipArchive::class),
             'restore_formats' => ['.zip', '.tar', '.tar.gz', '.json.gz', '.json'],

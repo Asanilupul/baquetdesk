@@ -23,7 +23,23 @@ class BackupController extends Controller
 
         $companyId = $this->companyId($request);
 
-        return response()->json(['data' => $backups->status($companyId), 'error' => null]);
+        // Catch-up: if auto backup is on and nothing ran today, create one when status is loaded
+        // (covers VPS installs where cron schedule:run is missing or delayed).
+        $catchup = null;
+        try {
+            if ($backups->autoEnabled() && ! $backups->hasSuccessfulBackupToday($companyId)) {
+                $catchup = $backups->ensureDailyBackup($companyId);
+            }
+        } catch (Throwable $e) {
+            $catchup = ['ran' => false, 'error' => $e->getMessage()];
+        }
+
+        $data = $backups->status($companyId);
+        if ($catchup !== null) {
+            $data['catchup'] = $catchup;
+        }
+
+        return response()->json(['data' => $data, 'error' => null]);
     }
 
     public function saveSettings(Request $request, BackupService $backups): JsonResponse
