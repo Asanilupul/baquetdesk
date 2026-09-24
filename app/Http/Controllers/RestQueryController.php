@@ -319,6 +319,7 @@ class RestQueryController extends Controller
             $payload['companies'] = $companyId !== '' && Schema::hasTable('companies')
                 ? DB::table('companies')->where('id', $companyId)->get()->map(fn ($r) => (array) $r)->all()
                 : [];
+            $payload['public_menu_token'] = $this->ensurePublicMenuToken($companyId);
 
             $attendanceQuery = DB::table('attendance');
             $this->applyCompanyScope($attendanceQuery, 'attendance', $companyId);
@@ -346,6 +347,21 @@ class RestQueryController extends Controller
                 'error' => ['message' => $e->getMessage()],
             ], 500);
         }
+    }
+
+    private function ensurePublicMenuToken(string $companyId): string
+    {
+        if ($companyId === '' || ! Schema::hasColumn('companies', 'public_menu_token')) {
+            return '';
+        }
+
+        $token = (string) (DB::table('companies')->where('id', $companyId)->value('public_menu_token') ?? '');
+        if ($token === '') {
+            $token = Str::random(40);
+            DB::table('companies')->where('id', $companyId)->update(['public_menu_token' => $token]);
+        }
+
+        return $token;
     }
 
     private function resolveCompanyId(Request $request): string
@@ -853,7 +869,7 @@ class RestQueryController extends Controller
         // Privilege / billing fields must not be client-writable via RestQuery
         $blocked = [];
         if ($table === 'companies') {
-            $blocked = ['subscription_plan', 'subscription_expires_at', 'subscription_status', 'status'];
+            $blocked = ['subscription_plan', 'subscription_expires_at', 'subscription_status', 'status', 'public_menu_token'];
         }
         if ($table === 'users') {
             $blocked = [];
