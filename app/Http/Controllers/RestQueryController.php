@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Services\AuditLogger;
 use App\Support\ComboPricing;
 use App\Support\CompanyApiSession;
 use App\Support\CompanySubscription;
@@ -21,6 +22,11 @@ class RestQueryController extends Controller
 {
     /** @var array<string, list<string>> */
     private static array $columnCache = [];
+
+    /** @var array{user_id: string, company_id: string, role: string, username: string}|null */
+    private ?array $auditSession = null;
+
+    private ?string $auditIp = null;
 
     /** @var array<string, array{column: string, ascending: bool}> */
     private array $bootstrapOrder = [
@@ -198,6 +204,9 @@ class RestQueryController extends Controller
                     }
                 }
             }
+
+            $this->auditSession = $session;
+            $this->auditIp = $request->ip();
 
             $result = match ($action) {
                 'select' => $this->runSelect($table, $select, $filters, $order, $limit, $single, $maybeSingle, $companyId),
@@ -528,6 +537,7 @@ class RestQueryController extends Controller
 
         foreach ($prepared as $row) {
             $this->afterDomainWrite($table, $this->decodeRow($table, $row), $companyId, 'insert');
+            $this->audit('create', $table, $row, $companyId, AuditLogger::snapshot($row));
         }
 
         if (! $returnRows) {
@@ -562,7 +572,13 @@ class RestQueryController extends Controller
 
         $update['updated_at'] = now();
 
+        $before = (clone $query)->get()->map(fn ($row) => (array) $row)->all();
+
         $query->update($update);
+
+        foreach ($before as $row) {
+            $this->audit('update', $table, $row, $companyId, AuditLogger::diff($row, array_merge($row, $update)));
+        }
 
         if ($table === 'payments') {
             $fresh = DB::table($table);
@@ -591,15 +607,13 @@ class RestQueryController extends Controller
         $this->applyCompanyScope($query, $table, $companyId);
         $this->applyFilters($query, $filters, $table);
 
-        $toDelete = [];
-        if ($table === 'payments') {
-            $toDelete = $query->get()->map(fn ($row) => $this->decodeRow($table, (array) $row))->all();
-        }
+        $toDelete = (clone $query)->get()->map(fn ($row) => $this->decodeRow($table, (array) $row))->all();
 
         $query->delete();
 
         foreach ($toDelete as $row) {
             $this->afterDomainWrite($table, $row, $companyId, 'delete');
+            $this->audit('delete', $table, $row, $companyId, AuditLogger::snapshot($row));
         }
 
         return null;
@@ -677,6 +691,30 @@ class RestQueryController extends Controller
         }
     }
 
+    /**
+     * @param  array<string, mixed>  $row
+     * @param  array<string, mixed>  $changes
+     */
+    private function audit(string $action, string $table, array $row, string $companyId, array $changes): void
+    {
+        if ($action === 'update' && $changes === []) {
+            return;
+        }
+
+        $recordId = $row['id'] ?? $row['key'] ?? null;
+
+        AuditLogger::record(
+            $this->auditSession,
+            $companyId,
+            $action,
+            $table,
+            $recordId !== null ? (string) $recordId : null,
+            AuditLogger::labelFor($row),
+            $changes,
+            $this->auditIp,
+        );
+    }
+
     private function handleLedgerAction(Request $request, string $action): JsonResponse
     {
         $session = CompanyApiSession::fromRequest($request);
@@ -719,6 +757,17 @@ class RestQueryController extends Controller
                 }
                 $result = LedgerService::postVoucher($companyId, $header, $lines);
 
+                AuditLogger::record(
+                    $session,
+                    $companyId,
+                    'post_voucher',
+                    'journal_vouchers',
+                    (string) (data_get($result, 'voucher.id') ?? ''),
+                    (string) (data_get($result, 'voucher.voucher_no') ?? $header['reference_no'] ?? ''),
+                    AuditLogger::snapshot(['header' => $header, 'lines' => $lines]),
+                    $request->ip(),
+                );
+
                 return response()->json(['data' => $result, 'error' => null]);
             }
 
@@ -730,6 +779,8 @@ class RestQueryController extends Controller
                 ], 400);
             }
             $result = LedgerService::voidVoucher($companyId, $voucherId);
+
+            AuditLogger::record($session, $companyId, 'void_voucher', 'journal_vouchers', $voucherId, null, null, $request->ip());
 
             return response()->json(['data' => $result, 'error' => null]);
         } catch (Throwable $e) {
@@ -795,11 +846,13 @@ class RestQueryController extends Controller
                 }
                 $decoded = $this->decodeRow($table, (array) $fresh->first());
                 $this->afterDomainWrite($table, $decoded, $companyId, 'update');
+                $this->audit('update', $table, (array) $found, $companyId, AuditLogger::diff((array) $found, $decoded));
                 $saved[] = $decoded;
             } else {
                 DB::table($table)->insert($prepared);
                 $decoded = $this->decodeRow($table, $prepared);
                 $this->afterDomainWrite($table, $decoded, $companyId, 'insert');
+                $this->audit('create', $table, $prepared, $companyId, AuditLogger::snapshot($prepared));
                 $saved[] = $decoded;
             }
         }

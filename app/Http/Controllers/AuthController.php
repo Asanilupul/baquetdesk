@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Services\AuditLogger;
 use App\Support\CompanyApiSession;
 use App\Support\CompanySubscription;
 use Illuminate\Http\JsonResponse;
@@ -47,13 +48,15 @@ class AuthController extends Controller
                     }
                 }
 
-                $payload = $this->publicUser($user);
-                $payload['api_token'] = CompanyApiSession::issue([
+                $claims = [
                     'user_id' => (string) $user->id,
                     'company_id' => $companyId,
                     'role' => (string) ($user->role ?? ''),
                     'username' => (string) $user->username,
-                ]);
+                ];
+                $payload = $this->publicUser($user);
+                $payload['api_token'] = CompanyApiSession::issue($claims);
+                AuditLogger::record($claims, $companyId, 'login', ipAddress: $request->ip());
 
                 return response()->json([
                     'data' => $payload,

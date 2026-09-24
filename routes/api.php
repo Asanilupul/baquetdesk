@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\AuditLogController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\BackupController;
 use App\Http\Controllers\CompanyController;
@@ -32,6 +33,9 @@ Route::post('/su/companies/{id}/status', [SuperAdminController::class, 'setCompa
     ->middleware('throttle:30,1');
 Route::post('/su/change-password', [SuperAdminController::class, 'changePassword'])
     ->middleware('throttle:5,1');
+
+Route::get('/audit-logs', [AuditLogController::class, 'index'])
+    ->middleware('throttle:60,1');
 
 Route::get('/backup/status', [BackupController::class, 'status'])
     ->middleware('throttle:60,1');
