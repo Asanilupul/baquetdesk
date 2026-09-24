@@ -376,6 +376,12 @@ class ApiSecurityTest extends TestCase
 
             $this->assertNotEmpty($matches[0], $file);
             foreach ($matches[0] as $tag) {
+                // cdn.tailwindcss.com sends no CORS headers, so SRI would block it; it is version-pinned instead
+                if (str_contains($tag, 'cdn.tailwindcss.com/')) {
+                    $this->assertStringNotContainsString('crossorigin', $tag, $file);
+
+                    continue;
+                }
                 $this->assertMatchesRegularExpression('/integrity="sha384-[A-Za-z0-9+\/=]+"/', $tag, $file);
                 $this->assertStringContainsString('crossorigin="anonymous"', $tag, $file);
             }
