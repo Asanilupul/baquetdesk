@@ -68,6 +68,14 @@ class AuthController extends Controller
             if (Schema::hasTable('vendors')) {
                 $vendor = DB::table('vendors')->where('username', $username)->first();
                 if ($vendor && $this->passwordMatches($vendor, $password, 'vendors')) {
+                    $status = strtolower(trim((string) ($vendor->status ?? '')));
+                    if ($status !== '' && $status !== 'active') {
+                        return response()->json([
+                            'data' => null,
+                            'error' => ['message' => 'This vendor account is not active. Contact the banquet hall.'],
+                        ], 403);
+                    }
+
                     $payload = $this->publicUser($vendor);
                     $payload['role'] = 'Vendor';
                     $payload['api_token'] = CompanyApiSession::issue([
@@ -94,6 +102,18 @@ class AuthController extends Controller
                 'error' => ['message' => 'Authentication temporarily unavailable'],
             ], 500);
         }
+    }
+
+    public function logout(Request $request): JsonResponse
+    {
+        $token = CompanyApiSession::tokenFromRequest($request);
+        $session = CompanyApiSession::validate($token);
+        if ($session !== null) {
+            CompanyApiSession::revoke($token);
+            AuditLogger::record($session, $session['company_id'], 'logout', ipAddress: $request->ip());
+        }
+
+        return response()->json(['data' => ['logged_out' => true], 'error' => null]);
     }
 
     private function passwordMatches(object $row, string $plain, string $table): bool

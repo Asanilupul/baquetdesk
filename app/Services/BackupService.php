@@ -4,7 +4,9 @@ namespace App\Services;
 
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\File;
+use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Str;
 use Phar;
 use PharData;
 use Throwable;
@@ -12,13 +14,21 @@ use ZipArchive;
 
 class BackupService
 {
+    /**
+     * Columns that must never be written into a backup archive.
+     *
+     * @var array<string, list<string>>
+     */
+    private const SECRET_COLUMNS = [
+        'users' => ['password', 'api_token', 'remember_token'],
+        'vendors' => ['password'],
+        'companies' => ['public_menu_token'],
+    ];
+
     public function backupDirectory(?string $companyId = null): string
     {
+        // Only the server operator (BACKUP_PATH in .env) may choose where backups are written
         $configured = trim((string) config('backup.path', ''));
-        if ($configured === '') {
-            $configured = (string) (DB::table('system_settings')->where('key', 'backup_path')->value('value') ?? '');
-        }
-        $configured = trim($configured);
         $base = '';
         if ($configured !== '' && $this->isSafePath($configured)) {
             if (! is_dir($configured)) {
@@ -57,23 +67,72 @@ class BackupService
         return $base;
     }
 
-    public function retentionDays(): int
+    public function retentionDays(?string $companyId = null): int
     {
         $fromConfig = (int) config('backup.retention_days', 14);
-        $fromDb = (int) (DB::table('system_settings')->where('key', 'backup_retention_days')->value('value') ?? 0);
+        $fromDb = (int) ($this->setting('backup_retention_days', $companyId) ?? 0);
 
         return max(1, $fromDb > 0 ? $fromDb : $fromConfig);
     }
 
-    public function autoEnabled(): bool
+    public function autoEnabled(?string $companyId = null): bool
     {
         $env = filter_var(config('backup.auto_enabled', true), FILTER_VALIDATE_BOOLEAN);
-        $row = DB::table('system_settings')->where('key', 'backup_auto_enabled')->value('value');
+        $row = $this->setting('backup_auto_enabled', $companyId);
         if ($row === null || $row === '') {
             return $env;
         }
 
-        return in_array(strtolower((string) $row), ['1', 'true', 'yes', 'on'], true);
+        return in_array(strtolower($row), ['1', 'true', 'yes', 'on'], true);
+    }
+
+    public function saveCompanySettings(string $companyId, bool $autoEnabled, int $retentionDays): void
+    {
+        $this->putSetting('backup_auto_enabled', $autoEnabled ? '1' : '0', $companyId);
+        $this->putSetting('backup_retention_days', (string) max(1, min(365, $retentionDays)), $companyId);
+    }
+
+    /**
+     * Company-specific value first, then the legacy global row.
+     */
+    private function setting(string $key, ?string $companyId = null): ?string
+    {
+        $companyId = trim((string) $companyId);
+        if ($companyId !== '' && $this->settingsHaveCompanyColumn()) {
+            $value = DB::table('system_settings')->where('key', $key)->where('company_id', $companyId)->value('value');
+            if ($value !== null && $value !== '') {
+                return (string) $value;
+            }
+        }
+
+        $query = DB::table('system_settings')->where('key', $key);
+        if ($this->settingsHaveCompanyColumn()) {
+            $query->whereNull('company_id');
+        }
+        $value = $query->value('value');
+
+        return $value === null ? null : (string) $value;
+    }
+
+    private function putSetting(string $key, string $value, ?string $companyId = null): void
+    {
+        $match = ['key' => $key];
+        if ($this->settingsHaveCompanyColumn()) {
+            $companyId = trim((string) $companyId);
+            $match['company_id'] = $companyId !== '' ? $companyId : null;
+        }
+
+        DB::table('system_settings')->updateOrInsert(
+            $match,
+            ['value' => $value, 'updated_at' => now(), 'created_at' => now()]
+        );
+    }
+
+    private function settingsHaveCompanyColumn(): bool
+    {
+        static $has = null;
+
+        return $has ??= Schema::hasColumn('system_settings', 'company_id');
     }
 
     /**
@@ -87,8 +146,8 @@ class BackupService
         }
 
         $suffix = '_'.$companyId;
-        $lastRun = (string) (DB::table('system_settings')->where('key', 'backup_last_run'.$suffix)->value('value') ?? '');
-        $lastError = (string) (DB::table('system_settings')->where('key', 'backup_last_error'.$suffix)->value('value') ?? '');
+        $lastRun = (string) ($this->setting('backup_last_run'.$suffix) ?? '');
+        $lastError = (string) ($this->setting('backup_last_error'.$suffix) ?? '');
         if ($lastRun !== '' && $lastError === '' && str_starts_with($lastRun, now()->toDateString())) {
             return true;
         }
@@ -120,7 +179,7 @@ class BackupService
         if ($companyId === '') {
             return ['ran' => false, 'skipped' => true, 'reason' => 'missing_company'];
         }
-        if (! $this->autoEnabled()) {
+        if (! $this->autoEnabled($companyId)) {
             return ['ran' => false, 'skipped' => true, 'reason' => 'auto_disabled'];
         }
         if ($this->hasSuccessfulBackupToday($companyId)) {
@@ -178,7 +237,7 @@ class BackupService
                     if ($table === 'system_settings') {
                         continue;
                     }
-                    $rows = $this->rowsForCompany($table, $companyId);
+                    $rows = $this->withoutSecrets($table, $this->rowsForCompany($table, $companyId));
                     $tablesPayload[$table] = $rows;
                     $tableCount++;
                     File::put($tempDir.'/'.$table.'.json', json_encode($rows, JSON_UNESCAPED_UNICODE));
@@ -223,7 +282,7 @@ class BackupService
      *
      * @return list<array{company_id: string, filename?: string, error?: string}>
      */
-    public function createBackupForAllCompanies(string $trigger = 'daily'): array
+    public function createBackupForAllCompanies(string $trigger = 'daily', bool $force = false): array
     {
         if (! Schema::hasTable('companies')) {
             return [];
@@ -233,6 +292,18 @@ class BackupService
         foreach (DB::table('companies')->orderBy('created_at')->get(['id', 'name']) as $company) {
             $companyId = (string) $company->id;
             try {
+                if ($trigger === 'daily' && ! $force && ! $this->autoEnabled($companyId)) {
+                    $results[] = [
+                        'company_id' => $companyId,
+                        'name' => (string) ($company->name ?? ''),
+                        'filename' => '(skipped — automatic backup disabled)',
+                        'size' => 0,
+                        'skipped' => true,
+                    ];
+
+                    continue;
+                }
+
                 // Hourly/daily scheduler: skip companies that already succeeded today
                 if ($trigger === 'daily' && $this->hasSuccessfulBackupToday($companyId)) {
                     $results[] = [
@@ -355,7 +426,7 @@ class BackupService
         }
 
         $dir = $this->backupDirectory($companyId);
-        $keepDays = $this->retentionDays();
+        $keepDays = $this->retentionDays($companyId);
         $cutoff = now()->subDays($keepDays)->getTimestamp();
 
         foreach (File::files($dir) as $file) {
@@ -397,25 +468,24 @@ class BackupService
     public function status(?string $companyId = null): array
     {
         $companyId = trim((string) $companyId);
-        $settings = DB::table('system_settings')->whereIn('key', [
-            'backup_auto_enabled',
-            'backup_path',
-            'backup_retention_days',
-            'backup_last_run_'.$companyId,
-            'backup_last_file_'.$companyId,
-            'backup_last_size_'.$companyId,
-            'backup_last_error_'.$companyId,
-            'backup_last_trigger_'.$companyId,
-        ])->pluck('value', 'key');
+        $settings = [];
+        foreach (['run', 'file', 'size', 'error', 'trigger'] as $field) {
+            $key = 'backup_last_'.$field.'_'.$companyId;
+            $value = $this->setting($key);
+            if ($value !== null) {
+                $settings[$key] = $value;
+            }
+        }
 
-        $auto = $this->autoEnabled();
+        $auto = $this->autoEnabled($companyId);
         $hasToday = $companyId !== '' ? $this->hasSuccessfulBackupToday($companyId) : false;
         $lastTrigger = $settings['backup_last_trigger_'.$companyId] ?? null;
 
         return [
             'auto_enabled' => $auto,
             'path' => $companyId !== '' ? $this->backupDirectory($companyId) : $this->backupDirectory(),
-            'retention_days' => $this->retentionDays(),
+            'path_managed_by_server' => true,
+            'retention_days' => $this->retentionDays($companyId),
             'company_id' => $companyId !== '' ? $companyId : null,
             'last_run' => $settings['backup_last_run_'.$companyId] ?? null,
             'last_file' => $settings['backup_last_file_'.$companyId] ?? null,
@@ -523,10 +593,25 @@ class BackupService
                         continue;
                     }
 
+                    // Backups carry no password hashes: keep each account's current one (or lock new ones)
+                    $keptPasswords = [];
+                    if (isset(self::SECRET_COLUMNS[$table]) && isset($columnFlip['password'])) {
+                        $keptPasswords = DB::table($table)->where('company_id', $companyId)->pluck('password', 'id')->all();
+                    }
+
                     DB::table($table)->where('company_id', $companyId)->delete();
                     $rows = array_values(array_filter($rows, function ($row) use ($companyId) {
                         return is_array($row) && (string) ($row['company_id'] ?? '') === $companyId;
                     }));
+                    if (isset(self::SECRET_COLUMNS[$table]) && isset($columnFlip['password'])) {
+                        $rows = array_map(function (array $row) use ($keptPasswords) {
+                            if (empty($row['password'])) {
+                                $row['password'] = $keptPasswords[(string) ($row['id'] ?? '')] ?? Hash::make(Str::random(40));
+                            }
+
+                            return $row;
+                        }, $rows);
+                    }
 
                     $batch = [];
                     foreach ($rows as $row) {
@@ -558,14 +643,8 @@ class BackupService
             $this->enableForeignKeys($driver);
         }
 
-        DB::table('system_settings')->updateOrInsert(
-            ['key' => 'backup_last_restore_'.$companyId],
-            ['value' => now()->toDateTimeString(), 'updated_at' => now(), 'created_at' => now()]
-        );
-        DB::table('system_settings')->updateOrInsert(
-            ['key' => 'backup_last_restore_source_'.$companyId],
-            ['value' => $name, 'updated_at' => now(), 'created_at' => now()]
-        );
+        $this->putSetting('backup_last_restore_'.$companyId, now()->toDateTimeString());
+        $this->putSetting('backup_last_restore_source_'.$companyId, $name);
 
         return [
             'tables_restored' => $tablesRestored,
@@ -863,11 +942,28 @@ class BackupService
             'backup_last_error'.$suffix => $error ?: '',
         ];
         foreach ($pairs as $key => $value) {
-            DB::table('system_settings')->updateOrInsert(
-                ['key' => $key],
-                ['value' => $value, 'updated_at' => now(), 'created_at' => now()]
-            );
+            $this->putSetting($key, $value);
         }
+    }
+
+    /**
+     * @param  list<array<string, mixed>>  $rows
+     * @return list<array<string, mixed>>
+     */
+    private function withoutSecrets(string $table, array $rows): array
+    {
+        $secrets = self::SECRET_COLUMNS[$table] ?? [];
+        if ($secrets === []) {
+            return $rows;
+        }
+
+        return array_map(function (array $row) use ($secrets) {
+            foreach ($secrets as $column) {
+                unset($row[$column]);
+            }
+
+            return $row;
+        }, $rows);
     }
 
     private function isSafePath(string $path): bool

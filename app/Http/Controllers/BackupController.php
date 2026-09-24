@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Services\BackupService;
+use App\Support\ApiPermissions;
 use App\Support\CompanyApiSession;
 use App\Support\CompanySubscription;
 use Illuminate\Http\JsonResponse;
@@ -27,11 +28,11 @@ class BackupController extends Controller
         // (covers VPS installs where cron schedule:run is missing or delayed).
         $catchup = null;
         try {
-            if ($backups->autoEnabled() && ! $backups->hasSuccessfulBackupToday($companyId)) {
+            if ($backups->autoEnabled($companyId) && ! $backups->hasSuccessfulBackupToday($companyId)) {
                 $catchup = $backups->ensureDailyBackup($companyId);
             }
         } catch (Throwable $e) {
-            $catchup = ['ran' => false, 'error' => $e->getMessage()];
+            $catchup = ['ran' => false, 'error' => 'Automatic catch-up backup failed (ref '.$this->logFailure($e, 'Backup catch-up').')'];
         }
 
         $data = $backups->status($companyId);
@@ -50,28 +51,10 @@ class BackupController extends Controller
 
         $companyId = $this->companyId($request);
         $auto = $request->boolean('auto_enabled', true);
-        $path = trim((string) $request->input('path', ''));
         $retention = max(1, min(365, (int) $request->input('retention_days', 14)));
 
-        if ($path !== '' && ! preg_match('#^([A-Za-z]:[\\\\/]|/|\\\\|storage/)#', $path)) {
-            return response()->json([
-                'data' => null,
-                'error' => ['message' => 'Backup path must be an absolute server path or storage/app/backups'],
-            ], 422);
-        }
-
-        // Global path/retention settings (base folder); company files still go in base/{company_id}
-        $pairs = [
-            'backup_auto_enabled' => $auto ? '1' : '0',
-            'backup_path' => $path,
-            'backup_retention_days' => (string) $retention,
-        ];
-        foreach ($pairs as $key => $value) {
-            DB::table('system_settings')->updateOrInsert(
-                ['key' => $key],
-                ['value' => $value, 'updated_at' => now(), 'created_at' => now()]
-            );
-        }
+        // The backup folder comes from BACKUP_PATH in .env only; tenants control their own schedule + retention
+        $backups->saveCompanySettings($companyId, $auto, $retention);
 
         return response()->json(['data' => $backups->status($companyId), 'error' => null]);
     }
@@ -89,10 +72,7 @@ class BackupController extends Controller
 
             return response()->json(['data' => $result + ['status' => $backups->status($companyId)], 'error' => null]);
         } catch (Throwable $e) {
-            return response()->json([
-                'data' => null,
-                'error' => ['message' => $e->getMessage()],
-            ], 500);
+            return $this->errorResponse($e, 'Backup request');
         }
     }
 
@@ -120,10 +100,7 @@ class BackupController extends Controller
                 'Content-Type' => $mime,
             ])->deleteFileAfterSend(false);
         } catch (Throwable $e) {
-            return response()->json([
-                'data' => null,
-                'error' => ['message' => $e->getMessage()],
-            ], 500);
+            return $this->errorResponse($e, 'Backup request');
         }
     }
 
@@ -250,23 +227,20 @@ class BackupController extends Controller
                 'error' => ['message' => 'Upload a backup file or choose a server backup filename.'],
             ], 422);
         } catch (Throwable $e) {
-            return response()->json([
-                'data' => null,
-                'error' => ['message' => $e->getMessage()],
-            ], 500);
+            return $this->errorResponse($e, 'Backup request');
         }
     }
 
     private function companyId(Request $request): string
     {
         $session = CompanyApiSession::fromRequest($request);
-        if ($session && $session['company_id'] !== '') {
-            return $session['company_id'];
-        }
 
-        return trim((string) ($request->header('X-Company-Id') ?: $request->input('company_id', '')));
+        return $session !== null && $session['role'] !== 'Vendor' ? $session['company_id'] : '';
     }
 
+    /**
+     * Backups contain the whole company dataset, so every backup endpoint is Admin-only.
+     */
     private function denyUnlessCompany(Request $request): ?JsonResponse
     {
         $session = CompanyApiSession::fromRequest($request);
@@ -281,8 +255,16 @@ class BackupController extends Controller
         if ($companyId === '') {
             return response()->json([
                 'data' => null,
-                'error' => ['message' => 'Company session required (X-Company-Id). Log in first.'],
+                'error' => ['message' => 'Company session required. Log in first.'],
             ], 401);
+        }
+
+        $actor = ApiPermissions::actor($session);
+        if ($actor === null || $actor['role'] !== 'Admin') {
+            return response()->json([
+                'data' => null,
+                'error' => ['message' => 'Only Admins can manage backups.'],
+            ], 403);
         }
 
         if (! Schema::hasTable('companies')) {

@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Services\AuditLogger;
+use App\Support\ApiPermissions;
 use App\Support\ComboPricing;
 use App\Support\CompanyApiSession;
 use App\Support\CompanySubscription;
@@ -14,6 +15,7 @@ use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use Throwable;
@@ -27,6 +29,8 @@ class RestQueryController extends Controller
     private ?array $auditSession = null;
 
     private ?string $auditIp = null;
+
+    private ?string $currentToken = null;
 
     /** @var array<string, array{column: string, ascending: bool}> */
     private array $bootstrapOrder = [
@@ -128,7 +132,6 @@ class RestQueryController extends Controller
                 ], 422);
             }
 
-            $companyId = $this->resolveCompanyId($request);
             $filters = $request->input('filters', []);
             $order = $request->input('order');
             $limit = $request->input('limit');
@@ -138,60 +141,6 @@ class RestQueryController extends Controller
             $payload = $request->input('payload');
             $onConflict = $request->input('onConflict');
             $returnRows = (bool) $request->input('returnRows', false);
-
-            // Public vendor self-registration is the only unscoped write allowed
-            $isPublicVendorRegister = $table === 'vendors' && $action === 'insert' && $companyId === '';
-            $session = null;
-
-            if (! $isPublicVendorRegister) {
-                $session = CompanyApiSession::fromRequest($request);
-                if ($session === null) {
-                    return response()->json([
-                        'data' => null,
-                        'error' => ['message' => 'Authentication required. Please log in again.'],
-                    ], 401);
-                }
-                // Token company is authoritative (prevents X-Company-Id spoofing)
-                if ($session['company_id'] !== '') {
-                    $companyId = $session['company_id'];
-                }
-            }
-
-            if ($companyId === '' && ! $isPublicVendorRegister) {
-                return response()->json([
-                    'data' => null,
-                    'error' => ['message' => 'Company session required (X-Company-Id).'],
-                ], 401);
-            }
-
-            if (in_array($table, ['companies'], true) && in_array($action, ['insert', 'delete', 'upsert'], true)) {
-                return response()->json([
-                    'data' => null,
-                    'error' => ['message' => 'Company records cannot be created or deleted via this API'],
-                ], 403);
-            }
-
-            if ($companyId !== '') {
-                if ($deny = $this->denyIfCompanyUnusable($companyId)) {
-                    return $deny;
-                }
-            }
-
-            // Only Admins may create/change user roles or module access
-            if ($table === 'users' && in_array($action, ['insert', 'update', 'upsert'], true)) {
-                $actorRole = $session['role'] ?? '';
-                if ($actorRole !== 'Admin') {
-                    $payloadRows = is_array($payload) ? (array_is_list($payload) ? $payload : [$payload]) : [];
-                    foreach ($payloadRows as $row) {
-                        if (is_array($row) && (array_key_exists('role', $row) || array_key_exists('allowed_modules', $row))) {
-                            return response()->json([
-                                'data' => null,
-                                'error' => ['message' => 'Only Admins can manage user roles and module access'],
-                            ], 403);
-                        }
-                    }
-                }
-            }
 
             // Never allow password filters (use /api/auth/login)
             if (is_array($filters)) {
@@ -205,8 +154,97 @@ class RestQueryController extends Controller
                 }
             }
 
+            $session = CompanyApiSession::fromRequest($request);
+
+            // Public vendor self-registration is the only unauthenticated write allowed
+            if ($session === null && $table === 'vendors' && $action === 'insert') {
+                return $this->handlePublicVendorRegister($request, $payload, $returnRows || $single || $maybeSingle, $single, $maybeSingle);
+            }
+
+            if ($session === null) {
+                return response()->json([
+                    'data' => null,
+                    'error' => ['message' => 'Authentication required. Please log in again.'],
+                ], 401);
+            }
+
+            if ($session['role'] === 'Vendor') {
+                return $this->handleVendorSession($request, $session, $table, $action, $payload, $filters, $single, $maybeSingle, $returnRows);
+            }
+
+            // Token company is authoritative; X-Company-Id is never trusted on its own
+            $companyId = $session['company_id'];
+            if ($companyId === '') {
+                return response()->json([
+                    'data' => null,
+                    'error' => ['message' => 'Company session required. Please log in again.'],
+                ], 401);
+            }
+
+            $actor = ApiPermissions::actor($session);
+            if ($actor === null) {
+                CompanyApiSession::revoke(CompanyApiSession::tokenFromRequest($request));
+
+                return response()->json([
+                    'data' => null,
+                    'error' => ['message' => 'Your session is no longer valid. Please log in again.'],
+                ], 401);
+            }
+            if (! ApiPermissions::isStaff($actor)) {
+                return response()->json([
+                    'data' => null,
+                    'error' => ['message' => 'Your role does not have access to company data.'],
+                ], 403);
+            }
+
+            $isWrite = in_array($action, ['insert', 'update', 'delete', 'upsert'], true);
+            if ($isWrite && $table === 'users' && $actor['role'] !== 'Admin') {
+                // Non-admins may only edit their own profile (never other accounts)
+                if ($action !== 'update') {
+                    return response()->json([
+                        'data' => null,
+                        'error' => ['message' => 'Only Admins can create or delete user accounts'],
+                    ], 403);
+                }
+                $filters = array_merge(is_array($filters) ? $filters : [], [
+                    ['column' => 'id', 'op' => 'eq', 'value' => $actor['id']],
+                ]);
+            } elseif ($isWrite && ! ApiPermissions::canWriteTable($actor, $table)) {
+                return response()->json([
+                    'data' => null,
+                    'error' => ['message' => 'You do not have permission to change '.str_replace('_', ' ', $table).'.'],
+                ], 403);
+            }
+
+            if (in_array($table, ['companies'], true) && in_array($action, ['insert', 'delete', 'upsert'], true)) {
+                return response()->json([
+                    'data' => null,
+                    'error' => ['message' => 'Company records cannot be created or deleted via this API'],
+                ], 403);
+            }
+
+            if ($deny = $this->denyIfCompanyUnusable($companyId)) {
+                return $deny;
+            }
+
+            // Only Admins may create/change user roles or module access
+            if ($table === 'users' && in_array($action, ['insert', 'update', 'upsert'], true)) {
+                if ($actor['role'] !== 'Admin') {
+                    $payloadRows = is_array($payload) ? (array_is_list($payload) ? $payload : [$payload]) : [];
+                    foreach ($payloadRows as $row) {
+                        if (is_array($row) && (array_key_exists('role', $row) || array_key_exists('allowed_modules', $row))) {
+                            return response()->json([
+                                'data' => null,
+                                'error' => ['message' => 'Only Admins can manage user roles and module access'],
+                            ], 403);
+                        }
+                    }
+                }
+            }
+
             $this->auditSession = $session;
             $this->auditIp = $request->ip();
+            $this->currentToken = CompanyApiSession::tokenFromRequest($request);
 
             $result = match ($action) {
                 'select' => $this->runSelect($table, $select, $filters, $order, $limit, $single, $maybeSingle, $companyId),
@@ -226,10 +264,7 @@ class RestQueryController extends Controller
 
             return response()->json(['data' => $result, 'error' => null]);
         } catch (Throwable $e) {
-            return response()->json([
-                'data' => null,
-                'error' => ['message' => $e->getMessage()],
-            ], 500);
+            return $this->errorResponse($e, 'Data API request');
         }
     }
 
@@ -239,7 +274,6 @@ class RestQueryController extends Controller
             $started = microtime(true);
             $attendanceStart = (string) $request->input('attendance_start', '');
             $attendanceEnd = (string) $request->input('attendance_end', '');
-            $companyId = $this->resolveCompanyId($request);
 
             $session = CompanyApiSession::fromRequest($request);
             if ($session === null) {
@@ -248,15 +282,37 @@ class RestQueryController extends Controller
                     'error' => ['message' => 'Authentication required. Please log in again.'],
                 ], 401);
             }
-            if ($session['company_id'] !== '') {
-                $companyId = $session['company_id'];
+
+            if ($session['role'] === 'Vendor') {
+                return response()->json([
+                    'data' => $this->vendorBootstrapPayload($session),
+                    'error' => null,
+                    'meta' => ['ms' => (int) round((microtime(true) - $started) * 1000), 'scope' => 'vendor'],
+                ]);
             }
 
+            $companyId = $session['company_id'];
             if ($companyId === '') {
                 return response()->json([
                     'data' => null,
-                    'error' => ['message' => 'Company session required (X-Company-Id).'],
+                    'error' => ['message' => 'Company session required. Please log in again.'],
                 ], 401);
+            }
+
+            $actor = ApiPermissions::actor($session);
+            if ($actor === null) {
+                CompanyApiSession::revoke(CompanyApiSession::tokenFromRequest($request));
+
+                return response()->json([
+                    'data' => null,
+                    'error' => ['message' => 'Your session is no longer valid. Please log in again.'],
+                ], 401);
+            }
+            if (! ApiPermissions::isStaff($actor)) {
+                return response()->json([
+                    'data' => null,
+                    'error' => ['message' => 'Your role does not have access to company data.'],
+                ], 403);
             }
 
             if ($deny = $this->denyIfCompanyUnusable($companyId)) {
@@ -282,12 +338,7 @@ class RestQueryController extends Controller
                         ->all();
                 } catch (Throwable $e) {
                     $payload[$table] = [];
-                    $bootstrapErrors[$table] = $e->getMessage();
-                    Log::warning('Bootstrap table failed', [
-                        'table' => $table,
-                        'company_id' => $companyId,
-                        'error' => $e->getMessage(),
-                    ]);
+                    $bootstrapErrors[$table] = 'Could not load (ref '.$this->logFailure($e, 'Bootstrap table '.$table).')';
                 }
             }
             if ($bootstrapErrors !== []) {
@@ -313,15 +364,14 @@ class RestQueryController extends Controller
                 }
             }
             if (! $settings) {
-                $settings = DB::table('system_settings')->get()
-                    ->map(function ($row) {
-                        $arr = (array) $row;
+                $settings = collect($this->settingsRowsForCompany($companyId))
+                    ->map(function (array $arr) {
                         if (($arr['key'] ?? '') === 'company_logo') {
                             $arr['value'] = '';
                             $arr['deferred'] = true;
                         }
 
-                        return $this->decodeRow('system_settings', $arr);
+                        return $arr;
                     })
                     ->all();
             }
@@ -352,10 +402,7 @@ class RestQueryController extends Controller
                 ],
             ]);
         } catch (Throwable $e) {
-            return response()->json([
-                'data' => null,
-                'error' => ['message' => $e->getMessage()],
-            ], 500);
+            return $this->errorResponse($e, 'Data API request');
         }
     }
 
@@ -374,11 +421,184 @@ class RestQueryController extends Controller
         return $token;
     }
 
-    private function resolveCompanyId(Request $request): string
+    /**
+     * Unauthenticated vendor sign-up: one row, never attached to a company, never privileged.
+     */
+    private function handlePublicVendorRegister(Request $request, mixed $payload, bool $returnRows, bool $single, bool $maybeSingle): JsonResponse
     {
-        $id = trim((string) ($request->header('X-Company-Id') ?: $request->input('company_id', '')));
+        $limiterKey = 'public-vendor-register:'.$request->ip();
+        if (RateLimiter::tooManyAttempts($limiterKey, 5)) {
+            return response()->json([
+                'data' => null,
+                'error' => ['message' => 'Too many vendor registrations from this network. Try again in '.ceil(RateLimiter::availableIn($limiterKey) / 60).' minutes.'],
+            ], 429);
+        }
+        RateLimiter::hit($limiterKey, 3600);
 
-        return $id;
+        $rows = is_array($payload) ? $this->normalizeRows($payload) : [];
+        if (count($rows) !== 1) {
+            return response()->json([
+                'data' => null,
+                'error' => ['message' => 'Register one vendor at a time.'],
+            ], 422);
+        }
+
+        $row = $rows[0];
+        $username = trim((string) ($row['username'] ?? ''));
+        $password = (string) ($row['password'] ?? '');
+        if ($username === '' || strlen($password) < 8 || trim((string) ($row['vendor_name'] ?? '')) === '') {
+            return response()->json([
+                'data' => null,
+                'error' => ['message' => 'Vendor name, username and a password of at least 8 characters are required.'],
+            ], 422);
+        }
+
+        $taken = DB::table('users')->where('username', $username)->exists()
+            || DB::table('vendors')->where('username', $username)->exists();
+        if ($taken) {
+            return response()->json([
+                'data' => null,
+                'error' => ['message' => 'That username is already taken.'],
+            ], 422);
+        }
+
+        unset($row['id'], $row['company_id'], $row['status'], $row['created_at'], $row['updated_at']);
+        $row['username'] = $username;
+        $row['status'] = 'Active';
+
+        $prepared = $this->prepareWriteRow('vendors', $row, true);
+        if (Schema::hasColumn('vendors', 'company_id')) {
+            $prepared['company_id'] = null;
+        }
+        DB::table('vendors')->insert($prepared);
+
+        if (! $returnRows) {
+            return response()->json(['data' => null, 'error' => null]);
+        }
+
+        $result = $this->shapeResult([$this->decodeRow('vendors', $prepared)], $single, $maybeSingle);
+
+        return response()->json(['data' => $result, 'error' => null]);
+    }
+
+    /**
+     * Vendor portal sessions may only read / edit their own vendor profile and read vendor categories.
+     *
+     * @param  array{user_id: string, company_id: string, role: string, username: string}  $session
+     */
+    private function handleVendorSession(
+        Request $request,
+        array $session,
+        string $table,
+        string $action,
+        mixed $payload,
+        mixed $filters,
+        bool $single,
+        bool $maybeSingle,
+        bool $returnRows
+    ): JsonResponse {
+        $vendorId = $session['user_id'];
+        $vendor = $vendorId !== '' ? DB::table('vendors')->where('id', $vendorId)->first() : null;
+        if (! $vendor || ! $this->vendorIsActive($vendor)) {
+            CompanyApiSession::revoke(CompanyApiSession::tokenFromRequest($request));
+
+            return response()->json([
+                'data' => null,
+                'error' => ['message' => 'Your vendor session is no longer valid. Please log in again.'],
+            ], 401);
+        }
+
+        $deny = fn () => response()->json([
+            'data' => null,
+            'error' => ['message' => 'Vendor accounts can only manage their own profile.'],
+        ], 403);
+
+        $vendorCompany = trim((string) ($vendor->company_id ?? ''));
+        $ownFilter = [['column' => 'id', 'op' => 'eq', 'value' => $vendorId]];
+        $filters = array_merge(is_array($filters) ? $filters : [], $ownFilter);
+
+        if ($table === 'vendor_categories' && $action === 'select') {
+            $result = $this->runSelect($table, '*', [], null, null, $single, $maybeSingle, $vendorCompany);
+        } elseif ($table === 'vendors' && $action === 'select') {
+            $result = $this->runSelect($table, '*', $filters, null, null, $single, $maybeSingle, $vendorCompany);
+        } elseif ($table === 'vendors' && $action === 'update' && is_array($payload)) {
+            unset($payload['id'], $payload['company_id'], $payload['status']);
+            $this->auditSession = $session;
+            $this->auditIp = $request->ip();
+            $this->currentToken = CompanyApiSession::tokenFromRequest($request);
+            $result = $this->runUpdate($table, $payload, $filters, $returnRows || $single || $maybeSingle, $single, $maybeSingle, $vendorCompany);
+        } else {
+            return $deny();
+        }
+
+        if (is_array($result) && array_key_exists('__error', $result)) {
+            return response()->json(['data' => $result['data'] ?? null, 'error' => $result['__error']]);
+        }
+
+        return response()->json(['data' => $result, 'error' => null]);
+    }
+
+    /**
+     * @param  array{user_id: string, company_id: string, role: string, username: string}  $session
+     * @return array<string, mixed>
+     */
+    private function vendorBootstrapPayload(array $session): array
+    {
+        $payload = array_fill_keys($this->allowedTables, []);
+        $vendor = DB::table('vendors')->where('id', $session['user_id'])->first();
+        if (! $vendor || ! $this->vendorIsActive($vendor)) {
+            return $payload;
+        }
+
+        $vendorCompany = trim((string) ($vendor->company_id ?? ''));
+        $payload['vendors'] = [$this->decodeRow('vendors', (array) $vendor)];
+        $categories = DB::table('vendor_categories');
+        $this->applyCompanyScope($categories, 'vendor_categories', $vendorCompany);
+        $payload['vendor_categories'] = $categories->orderBy('name')->get()
+            ->map(fn ($row) => $this->decodeRow('vendor_categories', (array) $row))
+            ->all();
+        $payload['public_menu_token'] = '';
+
+        return $payload;
+    }
+
+    private function vendorIsActive(object $vendor): bool
+    {
+        $status = strtolower(trim((string) ($vendor->status ?? '')));
+
+        return $status === '' || $status === 'active';
+    }
+
+    /**
+     * Company-specific settings layered over global defaults (backup bookkeeping keys are never exposed).
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function settingsRowsForCompany(string $companyId, mixed $filters = []): array
+    {
+        $hasCompanyColumn = Schema::hasColumn('system_settings', 'company_id');
+        $query = DB::table('system_settings')->where('key', 'not like', 'backup%');
+        $this->applyFilters($query, $filters, 'system_settings');
+        if ($hasCompanyColumn) {
+            $query->where(function ($q) use ($companyId) {
+                $q->whereNull('company_id');
+                if ($companyId !== '') {
+                    $q->orWhere('company_id', $companyId);
+                }
+            });
+        }
+
+        $byKey = [];
+        foreach ($query->get() as $row) {
+            $arr = (array) $row;
+            $key = (string) ($arr['key'] ?? '');
+            $isCompanyRow = $hasCompanyColumn && (string) ($arr['company_id'] ?? '') !== '';
+            if (! isset($byKey[$key]) || $isCompanyRow) {
+                $byKey[$key] = $arr;
+            }
+        }
+
+        return array_values(array_map(fn (array $arr) => $this->decodeRow('system_settings', $arr), $byKey));
     }
 
     private function denyIfCompanyUnusable(string $companyId): ?JsonResponse
@@ -454,10 +674,6 @@ class RestQueryController extends Controller
             return;
         }
 
-        if ($table === 'system_settings') {
-            return;
-        }
-
         if (! Schema::hasColumn($table, 'company_id')) {
             return;
         }
@@ -481,6 +697,10 @@ class RestQueryController extends Controller
         bool $maybeSingle,
         string $companyId = ''
     ): mixed {
+        if ($table === 'system_settings') {
+            return $this->shapeResult($this->settingsRowsForCompany($companyId, $filters), $single, $maybeSingle);
+        }
+
         $query = DB::table($table);
         $this->applyCompanyScope($query, $table, $companyId);
         $this->applyFilters($query, $filters, $table);
@@ -580,6 +800,19 @@ class RestQueryController extends Controller
             $this->audit('update', $table, $row, $companyId, AuditLogger::diff($row, array_merge($row, $update)));
         }
 
+        $credentialsChanged = array_intersect(['password', 'role', 'allowed_modules', 'username', 'status'], array_keys($update)) !== [];
+        if (in_array($table, ['users', 'vendors'], true) && $credentialsChanged) {
+            foreach ($before as $row) {
+                $changed = array_filter(
+                    ['password', 'role', 'allowed_modules', 'username', 'status'],
+                    fn ($col) => array_key_exists($col, $update) && (string) ($row[$col] ?? '') !== (string) $update[$col]
+                );
+                if ($changed !== []) {
+                    CompanyApiSession::revokeUser((string) ($row['id'] ?? ''), $this->currentToken);
+                }
+            }
+        }
+
         if ($table === 'payments') {
             $fresh = DB::table($table);
             $this->applyCompanyScope($fresh, $table, $companyId);
@@ -614,6 +847,9 @@ class RestQueryController extends Controller
         foreach ($toDelete as $row) {
             $this->afterDomainWrite($table, $row, $companyId, 'delete');
             $this->audit('delete', $table, $row, $companyId, AuditLogger::snapshot($row));
+            if (in_array($table, ['users', 'vendors'], true)) {
+                CompanyApiSession::revokeUser((string) ($row['id'] ?? ''));
+            }
         }
 
         return null;
@@ -725,15 +961,26 @@ class RestQueryController extends Controller
             ], 401);
         }
 
-        $companyId = $session['company_id'] !== ''
-            ? $session['company_id']
-            : $this->resolveCompanyId($request);
-
-        if ($companyId === '') {
+        $companyId = $session['company_id'];
+        if ($companyId === '' || $session['role'] === 'Vendor') {
             return response()->json([
                 'data' => null,
-                'error' => ['message' => 'Company session required (X-Company-Id).'],
+                'error' => ['message' => 'Company session required. Please log in again.'],
             ], 401);
+        }
+
+        $actor = ApiPermissions::actor($session);
+        if ($actor === null) {
+            return response()->json([
+                'data' => null,
+                'error' => ['message' => 'Your session is no longer valid. Please log in again.'],
+            ], 401);
+        }
+        if (! ApiPermissions::canWriteTable($actor, 'journal_vouchers')) {
+            return response()->json([
+                'data' => null,
+                'error' => ['message' => 'You do not have permission to post or void journal vouchers.'],
+            ], 403);
         }
 
         if ($deny = $this->denyIfCompanyUnusable($companyId)) {
@@ -784,10 +1031,7 @@ class RestQueryController extends Controller
 
             return response()->json(['data' => $result, 'error' => null]);
         } catch (Throwable $e) {
-            return response()->json([
-                'data' => null,
-                'error' => ['message' => $e->getMessage()],
-            ], 422);
+            return $this->errorResponse($e, 'Ledger action', 422);
         }
     }
 
@@ -820,6 +1064,7 @@ class RestQueryController extends Controller
             }
 
             $existing = DB::table($table);
+            $this->applyCompanyScope($existing, $table, $companyId);
             foreach ($match as $col => $val) {
                 $existing->where($col, $val);
             }
@@ -835,12 +1080,14 @@ class RestQueryController extends Controller
                 $update['updated_at'] = now();
 
                 $q = DB::table($table);
+                $this->applyCompanyScope($q, $table, $companyId);
                 foreach ($match as $col => $val) {
                     $q->where($col, $val);
                 }
                 $q->update($update);
 
                 $fresh = DB::table($table);
+                $this->applyCompanyScope($fresh, $table, $companyId);
                 foreach ($match as $col => $val) {
                     $fresh->where($col, $val);
                 }
@@ -973,9 +1220,11 @@ class RestQueryController extends Controller
 
         if (array_key_exists('password', $out) && $out['password'] !== null && $out['password'] !== '') {
             $plain = (string) $out['password'];
-            if (! Hash::isHashed($plain)) {
-                $out['password'] = Hash::make($plain);
+            // Clients never receive hashes, so a hash-looking value is treated as a plaintext choice too
+            if (strlen($plain) < 8) {
+                throw new \InvalidArgumentException('Password must be at least 8 characters');
             }
+            $out['password'] = Hash::make($plain);
         } elseif (array_key_exists('password', $out) && ($out['password'] === null || $out['password'] === '')) {
             unset($out['password']);
         }

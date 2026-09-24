@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Support\ApiPermissions;
 use App\Support\CompanyApiSession;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -30,10 +31,10 @@ class CompanyController extends Controller
             ], 422);
         }
 
-        if (strlen($password) < 4) {
+        if (strlen($password) < 8) {
             return response()->json([
                 'data' => null,
-                'error' => ['message' => 'Password must be at least 4 characters'],
+                'error' => ['message' => 'Password must be at least 8 characters'],
             ], 422);
         }
 
@@ -107,10 +108,7 @@ class CompanyController extends Controller
 
             return response()->json(['data' => $result, 'error' => null]);
         } catch (Throwable $e) {
-            return response()->json([
-                'data' => null,
-                'error' => ['message' => $e->getMessage()],
-            ], 500);
+            return $this->errorResponse($e, 'Company registration');
         }
     }
 
@@ -130,6 +128,7 @@ class CompanyController extends Controller
         }
 
         $data = (array) $company;
+
         // Public company profile for the owning session only
         return response()->json(['data' => $data, 'error' => null]);
     }
@@ -141,6 +140,14 @@ class CompanyController extends Controller
             return response()->json([
                 'data' => null,
                 'error' => ['message' => 'Company session required'],
+            ], 403);
+        }
+
+        $actor = ApiPermissions::actor($session);
+        if ($actor === null || ! ApiPermissions::canWriteTable($actor, 'companies')) {
+            return response()->json([
+                'data' => null,
+                'error' => ['message' => 'You do not have permission to change company details.'],
             ], 403);
         }
 

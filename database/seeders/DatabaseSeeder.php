@@ -129,8 +129,11 @@ class DatabaseSeeder extends Seeder
             'general_watermark' => 'BanquetDesk',
         ];
 
+        $scopedSettings = Schema::hasColumn('system_settings', 'company_id');
         foreach ($settings as $key => $value) {
-            $existing = DB::table('system_settings')->where('key', $key)->first();
+            $existing = DB::table('system_settings')->where('key', $key)
+                ->when($scopedSettings, fn ($query) => $query->whereNull('company_id'))
+                ->first();
             if ($existing) {
                 // Never wipe registered company branding on re-seed
                 $isCompanyKey = str_starts_with($key, 'company_');
@@ -141,10 +144,13 @@ class DatabaseSeeder extends Seeder
                 if (filled($existing->value)) {
                     continue;
                 }
-                DB::table('system_settings')->where('key', $key)->update([
-                    'value' => $value,
-                    'updated_at' => $now,
-                ]);
+                DB::table('system_settings')->where('key', $key)
+                    ->when($scopedSettings, fn ($query) => $query->whereNull('company_id'))
+                    ->update([
+                        'value' => $value,
+                        'updated_at' => $now,
+                    ]);
+
                 continue;
             }
 

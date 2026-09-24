@@ -167,10 +167,10 @@ class SuperAdminController extends Controller
             ], 422);
         }
 
-        if (strlen($newPassword) < 4) {
+        if (strlen($newPassword) < 10) {
             return response()->json([
                 'data' => null,
-                'error' => ['message' => 'New password must be at least 4 characters'],
+                'error' => ['message' => 'New password must be at least 10 characters'],
             ], 422);
         }
 

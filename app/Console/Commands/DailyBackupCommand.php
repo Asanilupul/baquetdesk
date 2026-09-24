@@ -14,14 +14,8 @@ class DailyBackupCommand extends Command
 
     public function handle(BackupService $backups): int
     {
-        if (! $this->option('force') && ! $backups->autoEnabled()) {
-            $this->info('Automatic backup is disabled. Use --force to run anyway.');
-
-            return self::SUCCESS;
-        }
-
         try {
-            $results = $backups->createBackupForAllCompanies('daily');
+            $results = $backups->createBackupForAllCompanies('daily', (bool) $this->option('force'));
             $ok = 0;
             $fail = 0;
             $skipped = 0;
@@ -31,7 +25,7 @@ class DailyBackupCommand extends Command
                     $this->error(($row['name'] ?? $row['company_id']).': '.$row['error']);
                 } elseif (! empty($row['skipped'])) {
                     $skipped++;
-                    $this->line(($row['name'] ?? $row['company_id']).': already backed up today');
+                    $this->line(($row['name'] ?? $row['company_id']).': '.$row['filename']);
                 } else {
                     $ok++;
                     $this->info(($row['name'] ?? $row['company_id']).': '.$row['filename'].' ('.$row['size'].' bytes)');

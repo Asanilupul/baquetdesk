@@ -10,6 +10,8 @@ use Illuminate\Support\Facades\Route;
 
 Route::post('/auth/login', [AuthController::class, 'login'])
     ->middleware('throttle:10,1');
+Route::post('/auth/logout', [AuthController::class, 'logout'])
+    ->middleware('throttle:30,1');
 
 Route::post('/db/query', [RestQueryController::class, 'handle'])
     ->middleware('throttle:120,1');
