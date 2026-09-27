@@ -33,6 +33,7 @@ class ApiPermissions
         'halls' => ['settings'],
         'function_types' => ['settings'],
         'meal_types' => ['settings'],
+        'hall_inclusions' => ['settings'],
         'companies' => ['settings'],
     ];
 

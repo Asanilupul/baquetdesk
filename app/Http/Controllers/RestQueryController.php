@@ -60,6 +60,7 @@ class RestQueryController extends Controller
         'halls' => ['column' => 'name', 'ascending' => true],
         'function_types' => ['column' => 'name', 'ascending' => true],
         'meal_types' => ['column' => 'start_time', 'ascending' => true],
+        'hall_inclusions' => ['column' => 'name', 'ascending' => true],
         'menu_extras' => ['column' => 'name', 'ascending' => true],
         'combo_packages' => ['column' => 'name', 'ascending' => true],
         'payroll_runs' => ['column' => 'period', 'ascending' => false],
@@ -75,7 +76,7 @@ class RestQueryController extends Controller
         'function_menu_selections', 'menu_addons', 'function_menu_addons', 'function_menu_extras', 'kitchen_sheets',
         'store_items', 'item_recipes', 'store_transactions', 'vendors', 'vendor_categories',
         'vendor_packages', 'accounts_coa', 'journal_entries', 'expense_entries', 'journal_vouchers', 'function_sheets',
-        'system_settings', 'production_balancing', 'halls', 'function_types', 'meal_types', 'menu_extras', 'combo_packages', 'companies',
+        'system_settings', 'production_balancing', 'halls', 'function_types', 'meal_types', 'hall_inclusions', 'menu_extras', 'combo_packages', 'companies',
         'payroll_runs', 'payroll_slips',
     ];
 
@@ -91,7 +92,7 @@ class RestQueryController extends Controller
         'function_sheets' => ['sheet_data'],
         'production_balancing' => ['in_store_items', 'processing_items', 'daily_sales'],
         'combo_packages' => ['vendor_package_ids', 'bite_lines', 'softdrink_lines', 'menu_options'],
-        'functions' => ['pricing_snapshot', 'optional_vendor_extras'],
+        'functions' => ['pricing_snapshot', 'optional_vendor_extras', 'hall_inclusions'],
         'payroll_runs' => ['totals'],
         'payroll_slips' => ['employee_snapshot', 'components'],
     ];
