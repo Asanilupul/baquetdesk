@@ -36,7 +36,7 @@ class ApiSecurityTest extends TestCase
         $this->adminToken = $this->issueToken($this->adminId, 'owner', 'Admin', $this->companyId);
     }
 
-    public function test_public_vendor_signup_cannot_attach_itself_to_a_company(): void
+    public function test_unauthenticated_vendor_insert_is_rejected(): void
     {
         $this->postJson('/api/db/query', [
             'action' => 'insert',
@@ -47,25 +47,10 @@ class ApiSecurityTest extends TestCase
                 'username' => 'evilvendor',
                 'password' => 'longpassword1',
                 'company_id' => $this->companyId,
-                'status' => 'Approved',
             ]],
-        ], ['X-Company-Id' => $this->companyId])->assertOk();
+        ], ['X-Company-Id' => $this->companyId])->assertUnauthorized();
 
-        $vendor = DB::table('vendors')->where('username', 'evilvendor')->first();
-        $this->assertNull($vendor->company_id);
-        $this->assertSame('Active', $vendor->status);
-        $this->assertTrue(Hash::check('longpassword1', $vendor->password));
-    }
-
-    public function test_public_vendor_signup_cannot_reuse_a_staff_username(): void
-    {
-        $this->postJson('/api/db/query', [
-            'action' => 'insert',
-            'table' => 'vendors',
-            'payload' => [['vendor_name' => 'Clone', 'category' => 'DJ', 'username' => 'owner', 'password' => 'longpassword1']],
-        ])->assertStatus(422);
-
-        $this->assertSame(0, DB::table('vendors')->where('username', 'owner')->count());
+        $this->assertSame(0, DB::table('vendors')->where('username', 'evilvendor')->count());
     }
 
     public function test_vendor_session_cannot_read_users_or_take_over_the_admin_account(): void
@@ -340,22 +325,15 @@ class ApiSecurityTest extends TestCase
         ])->assertStatus(422);
     }
 
-    public function test_public_vendor_signup_is_rate_limited_per_ip(): void
+    public function test_vendor_invite_registration_is_rate_limited_per_ip(): void
     {
-        for ($i = 1; $i <= 5; $i++) {
-            $this->postJson('/api/db/query', [
-                'action' => 'insert',
-                'table' => 'vendors',
-                'payload' => [['vendor_name' => "Spam {$i}", 'category' => 'DJ', 'username' => "spam{$i}", 'password' => 'longpassword1']],
-            ])->assertOk();
+        $payload = ['token' => 'guess', 'vendor_name' => 'Spam', 'category' => 'DJ', 'username' => 'spam', 'password' => 'longpassword1'];
+        for ($i = 1; $i <= 10; $i++) {
+            $this->postJson('/api/vendor-invites/register', $payload)->assertStatus(410);
         }
 
-        $this->postJson('/api/db/query', [
-            'action' => 'insert',
-            'table' => 'vendors',
-            'payload' => [['vendor_name' => 'Spam 6', 'category' => 'DJ', 'username' => 'spam6', 'password' => 'longpassword1']],
-        ])->assertStatus(429);
-        $this->assertDatabaseMissing('vendors', ['username' => 'spam6']);
+        $this->postJson('/api/vendor-invites/register', $payload)->assertStatus(429);
+        $this->assertDatabaseMissing('vendors', ['username' => 'spam']);
     }
 
     public function test_cors_only_allows_the_app_origin(): void

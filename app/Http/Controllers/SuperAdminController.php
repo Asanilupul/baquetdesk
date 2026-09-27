@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Support\CompanySubscription;
+use App\Support\VendorInvites;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
@@ -147,6 +148,73 @@ class SuperAdminController extends Controller
                 'error' => ['message' => $e->getMessage()],
             ], $code);
         }
+    }
+
+    /**
+     * Every registered vendor grouped by company, with recent registration links.
+     */
+    public function vendors(Request $request): JsonResponse
+    {
+        if ($deny = $this->denyUnlessSu($request)) {
+            return $deny;
+        }
+
+        $decode = function (object $vendor): array {
+            $row = (array) $vendor;
+            unset($row['password']);
+            foreach (['pictures', 'packages'] as $column) {
+                if (isset($row[$column]) && is_string($row[$column])) {
+                    $row[$column] = json_decode($row[$column], true) ?: [];
+                }
+            }
+
+            return $row;
+        };
+
+        $vendorsByCompany = DB::table('vendors')->orderBy('vendor_name')->get()->groupBy(fn ($v) => (string) ($v->company_id ?? ''));
+        $invitesByCompany = Schema::hasTable('vendor_invites')
+            ? DB::table('vendor_invites')->orderByDesc('created_at')->get()->groupBy('company_id')
+            : collect();
+
+        $groups = DB::table('companies')->orderBy('name')->get()->map(fn (object $company) => [
+            'company_id' => $company->id,
+            'company_name' => $company->name,
+            'vendors' => ($vendorsByCompany[$company->id] ?? collect())->map($decode)->values()->all(),
+            'invites' => ($invitesByCompany[$company->id] ?? collect())->take(20)->map(fn ($i) => VendorInvites::present($i))->values()->all(),
+        ])->all();
+
+        $unassigned = ($vendorsByCompany[''] ?? collect())->map($decode)->values()->all();
+        if ($unassigned !== []) {
+            $groups[] = ['company_id' => null, 'company_name' => 'Not linked to a company', 'vendors' => $unassigned, 'invites' => []];
+        }
+
+        return response()->json(['data' => $groups, 'error' => null]);
+    }
+
+    public function createVendorInvites(Request $request): JsonResponse
+    {
+        if ($deny = $this->denyUnlessSu($request)) {
+            return $deny;
+        }
+
+        $companyIds = array_values(array_unique(array_filter(array_map('strval', (array) $request->input('company_ids', [])))));
+        if ($companyIds === []) {
+            return response()->json(['data' => null, 'error' => ['message' => 'Select at least one company.']], 422);
+        }
+
+        $companies = DB::table('companies')->whereIn('id', $companyIds)->orderBy('name')->get();
+        $links = $companies->map(function (object $company) use ($request) {
+            $created = VendorInvites::create($company->id, null, 'Super Admin', (string) $request->input('note', ''));
+
+            return [
+                'company_id' => $company->id,
+                'company_name' => $company->name,
+                'link' => $created['link'],
+                'expires_at' => $created['invite']['expires_at'],
+            ];
+        })->values()->all();
+
+        return response()->json(['data' => $links, 'error' => null]);
     }
 
     public function changePassword(Request $request): JsonResponse

@@ -15,7 +15,6 @@ use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use Throwable;
@@ -156,11 +155,6 @@ class RestQueryController extends Controller
             }
 
             $session = CompanyApiSession::fromRequest($request);
-
-            // Public vendor self-registration is the only unauthenticated write allowed
-            if ($session === null && $table === 'vendors' && $action === 'insert') {
-                return $this->handlePublicVendorRegister($request, $payload, $returnRows || $single || $maybeSingle, $single, $maybeSingle);
-            }
 
             if ($session === null) {
                 return response()->json([
@@ -420,66 +414,6 @@ class RestQueryController extends Controller
         }
 
         return $token;
-    }
-
-    /**
-     * Unauthenticated vendor sign-up: one row, never attached to a company, never privileged.
-     */
-    private function handlePublicVendorRegister(Request $request, mixed $payload, bool $returnRows, bool $single, bool $maybeSingle): JsonResponse
-    {
-        $limiterKey = 'public-vendor-register:'.$request->ip();
-        if (RateLimiter::tooManyAttempts($limiterKey, 5)) {
-            return response()->json([
-                'data' => null,
-                'error' => ['message' => 'Too many vendor registrations from this network. Try again in '.ceil(RateLimiter::availableIn($limiterKey) / 60).' minutes.'],
-            ], 429);
-        }
-        RateLimiter::hit($limiterKey, 3600);
-
-        $rows = is_array($payload) ? $this->normalizeRows($payload) : [];
-        if (count($rows) !== 1) {
-            return response()->json([
-                'data' => null,
-                'error' => ['message' => 'Register one vendor at a time.'],
-            ], 422);
-        }
-
-        $row = $rows[0];
-        $username = trim((string) ($row['username'] ?? ''));
-        $password = (string) ($row['password'] ?? '');
-        if ($username === '' || strlen($password) < 8 || trim((string) ($row['vendor_name'] ?? '')) === '') {
-            return response()->json([
-                'data' => null,
-                'error' => ['message' => 'Vendor name, username and a password of at least 8 characters are required.'],
-            ], 422);
-        }
-
-        $taken = DB::table('users')->where('username', $username)->exists()
-            || DB::table('vendors')->where('username', $username)->exists();
-        if ($taken) {
-            return response()->json([
-                'data' => null,
-                'error' => ['message' => 'That username is already taken.'],
-            ], 422);
-        }
-
-        unset($row['id'], $row['company_id'], $row['status'], $row['created_at'], $row['updated_at']);
-        $row['username'] = $username;
-        $row['status'] = 'Active';
-
-        $prepared = $this->prepareWriteRow('vendors', $row, true);
-        if (Schema::hasColumn('vendors', 'company_id')) {
-            $prepared['company_id'] = null;
-        }
-        DB::table('vendors')->insert($prepared);
-
-        if (! $returnRows) {
-            return response()->json(['data' => null, 'error' => null]);
-        }
-
-        $result = $this->shapeResult([$this->decodeRow('vendors', $prepared)], $single, $maybeSingle);
-
-        return response()->json(['data' => $result, 'error' => null]);
     }
 
     /**

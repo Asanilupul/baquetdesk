@@ -64,10 +64,74 @@ function App() {
     const [busyId, setBusyId] = useState('');
     const [showPwd, setShowPwd] = useState(false);
     const [pwdForm, setPwdForm] = useState({ current_password: '', new_password: '', new_password_confirmation: '' });
+    const [view, setView] = useState('companies');
+    const [vendorGroups, setVendorGroups] = useState([]);
+    const [inviteCompanyIds, setInviteCompanyIds] = useState([]);
+    const [inviteNote, setInviteNote] = useState('');
+    const [inviteLinks, setInviteLinks] = useState([]);
+    const [vendorSearch, setVendorSearch] = useState('');
 
     const loadCompanies = async (tok = token) => {
         const data = await api('/api/su/companies', { token: tok });
         setCompanies(data || []);
+    };
+
+    const loadVendors = async () => {
+        setError('');
+        try {
+            setVendorGroups((await api('/api/su/vendors', { token })) || []);
+        } catch (err) {
+            setError(err.message || String(err));
+        }
+    };
+
+    const openVendors = () => {
+        setView('vendors');
+        setInviteLinks([]);
+        loadVendors();
+    };
+
+    const toggleInviteCompany = (id) => {
+        setInviteCompanyIds((ids) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]));
+    };
+
+    const sendInvites = async () => {
+        setError('');
+        setOkMsg('');
+        if (inviteCompanyIds.length === 0) {
+            setError('Select at least one company.');
+            return;
+        }
+        setBusyId('invites');
+        try {
+            const links = await api('/api/su/vendor-invites', {
+                method: 'POST',
+                token,
+                body: { company_ids: inviteCompanyIds, note: inviteNote },
+            });
+            setInviteLinks(links || []);
+            setInviteCompanyIds([]);
+            setInviteNote('');
+            setOkMsg(`${(links || []).length} registration link(s) created. Each link registers one vendor into that company only.`);
+            loadVendors();
+        } catch (err) {
+            setError(err.message || String(err));
+        } finally {
+            setBusyId('');
+        }
+    };
+
+    const copyLink = (link) => {
+        if (navigator.clipboard) {
+            navigator.clipboard.writeText(link).then(() => setOkMsg('Link copied.'), () => setError('Copy failed - select the link and copy it manually.'));
+        }
+    };
+
+    const matchesVendorSearch = (v) => {
+        const q = vendorSearch.trim().toLowerCase();
+        if (!q) return true;
+        return [v.vendor_name, v.category, v.username, v.phone, v.whatsapp, v.email, v.address]
+            .some((field) => String(field || '').toLowerCase().includes(q));
     };
 
     useEffect(() => {
@@ -209,7 +273,12 @@ function App() {
                     <button onClick={() => setShowPwd(v => !v)} className="px-4 py-2 rounded-xl bg-indigo-600/20 border border-indigo-500/30 text-indigo-200 text-xs font-black uppercase">
                         {showPwd ? 'Close Password' : 'Change Password'}
                     </button>
-                    <button onClick={() => loadCompanies()} className="px-4 py-2 rounded-xl bg-slate-800 border border-slate-700 text-xs font-black uppercase">Refresh</button>
+                    {view === 'companies' ? (
+                        <button onClick={openVendors} className="px-4 py-2 rounded-xl bg-emerald-600/20 border border-emerald-500/30 text-emerald-200 text-xs font-black uppercase">Vendors</button>
+                    ) : (
+                        <button onClick={() => setView('companies')} className="px-4 py-2 rounded-xl bg-emerald-600/20 border border-emerald-500/30 text-emerald-200 text-xs font-black uppercase">Companies</button>
+                    )}
+                    <button onClick={() => (view === 'vendors' ? loadVendors() : loadCompanies())} className="px-4 py-2 rounded-xl bg-slate-800 border border-slate-700 text-xs font-black uppercase">Refresh</button>
                     <button onClick={logout} className="px-4 py-2 rounded-xl bg-rose-600/20 border border-rose-500/30 text-rose-300 text-xs font-black uppercase">Logout</button>
                 </div>
             </header>
@@ -239,6 +308,118 @@ function App() {
                 </form>
             )}
 
+            {view === 'vendors' && (
+                <div className="space-y-6">
+                    <section className="rounded-[28px] border border-slate-800 bg-slate-900/70 p-6 space-y-4">
+                        <div>
+                            <h2 className="text-lg font-black">Send vendor registration links</h2>
+                            <p className="text-xs text-slate-400 mt-1">Tick companies to create one unique link per company. A link registers one vendor into that company only, cannot be reused and expires in 14 days. Links are shown only once.</p>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                            {companies.map((c) => (
+                                <label key={c.id} className={`px-3 py-2 rounded-xl border text-xs font-black cursor-pointer flex items-center gap-2 ${inviteCompanyIds.includes(c.id) ? 'border-indigo-400 bg-indigo-600/20 text-indigo-100' : 'border-slate-700 text-slate-400'}`}>
+                                    <input type="checkbox" checked={inviteCompanyIds.includes(c.id)} onChange={() => toggleInviteCompany(c.id)} />
+                                    {c.name}
+                                </label>
+                            ))}
+                        </div>
+                        <div className="flex flex-col md:flex-row gap-3">
+                            <input value={inviteNote} onChange={(e) => setInviteNote(e.target.value)} placeholder="Note (optional, e.g. vendor name / phone)" className="flex-1 p-3 rounded-2xl bg-slate-950 border border-slate-700 outline-none focus:border-indigo-500 text-sm font-bold" />
+                            <button disabled={busyId === 'invites'} onClick={sendInvites} className="px-5 py-3 rounded-2xl bg-indigo-600 hover:bg-indigo-500 text-xs font-black uppercase disabled:opacity-50">
+                                {busyId === 'invites' ? 'Creating…' : `Generate Links (${inviteCompanyIds.length})`}
+                            </button>
+                        </div>
+                        {inviteLinks.length > 0 && (
+                            <div className="space-y-2">
+                                {inviteLinks.map((l) => (
+                                    <div key={l.link} className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 p-3 flex flex-col md:flex-row md:items-center gap-2">
+                                        <span className="text-xs font-black text-emerald-200 md:w-48 shrink-0">{l.company_name}</span>
+                                        <input readOnly value={l.link} onFocus={(e) => e.target.select()} className="flex-1 p-2 rounded-xl bg-slate-950 border border-slate-700 text-xs font-bold" />
+                                        <div className="flex gap-2">
+                                            <button onClick={() => copyLink(l.link)} className="px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-[10px] font-black uppercase">Copy</button>
+                                            <a href={'https://wa.me/?text=' + encodeURIComponent(`Please register as a vendor for ${l.company_name} using this link (it works for one registration only): ${l.link}`)} target="_blank" rel="noopener noreferrer" className="px-3 py-2 rounded-xl bg-emerald-600/30 border border-emerald-500/40 text-[10px] font-black uppercase">WhatsApp</a>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </section>
+
+                    <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+                        <h2 className="text-lg font-black">Registered vendors by company ({vendorGroups.reduce((n, g) => n + g.vendors.length, 0)})</h2>
+                        <input value={vendorSearch} onChange={(e) => setVendorSearch(e.target.value)} placeholder="Search name, category, phone, email…" className="md:w-80 p-3 rounded-2xl bg-slate-950 border border-slate-700 outline-none focus:border-indigo-500 text-sm font-bold" />
+                    </div>
+
+                    {vendorGroups.map((g) => {
+                        const list = g.vendors.filter(matchesVendorSearch);
+                        const pending = g.invites.filter((i) => i.status === 'pending').length;
+                        return (
+                            <section key={g.company_id || 'unassigned'} className="rounded-[28px] border border-slate-800 bg-slate-900/70 overflow-hidden">
+                                <div className="p-5 border-b border-slate-800 flex flex-wrap items-center justify-between gap-2">
+                                    <div className="font-black text-slate-100">{g.company_name}</div>
+                                    <div className="text-[10px] font-black uppercase text-slate-400 flex gap-3">
+                                        <span>{g.vendors.length} vendor(s)</span>
+                                        {g.company_id && <span>{pending} open link(s)</span>}
+                                    </div>
+                                </div>
+                                {list.length === 0 ? (
+                                    <p className="p-5 text-xs text-slate-500">{g.vendors.length === 0 ? 'No vendors registered yet.' : 'No vendors match the search.'}</p>
+                                ) : (
+                                    <div className="overflow-x-auto">
+                                        <table className="w-full text-left text-xs min-w-[1000px]">
+                                            <thead className="text-[10px] uppercase tracking-wider text-slate-500 border-b border-slate-800">
+                                                <tr>
+                                                    <th className="p-3">Vendor</th>
+                                                    <th className="p-3">Categories</th>
+                                                    <th className="p-3">Login</th>
+                                                    <th className="p-3">Contact</th>
+                                                    <th className="p-3">Address</th>
+                                                    <th className="p-3">Packages</th>
+                                                    <th className="p-3">Status</th>
+                                                    <th className="p-3">Registered</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {list.map((v) => (
+                                                    <tr key={v.id} className="border-b border-slate-800/70 align-top">
+                                                        <td className="p-3">
+                                                            <div className="font-black text-slate-100">{v.vendor_name}</div>
+                                                            {v.description && <div className="text-slate-500 mt-1 max-w-xs">{v.description}</div>}
+                                                            {Array.isArray(v.pictures) && v.pictures.length > 0 && <div className="text-slate-500 mt-1">{v.pictures.length} picture(s)</div>}
+                                                        </td>
+                                                        <td className="p-3 text-slate-300">{v.category || '—'}</td>
+                                                        <td className="p-3 font-bold text-slate-300">{v.username || '—'}</td>
+                                                        <td className="p-3 text-slate-300">
+                                                            {v.phone && <div>Phone: {v.phone}</div>}
+                                                            {v.whatsapp && <div>WhatsApp: {v.whatsapp}</div>}
+                                                            {v.email && <div>{v.email}</div>}
+                                                            {!v.phone && !v.whatsapp && !v.email && '—'}
+                                                        </td>
+                                                        <td className="p-3 text-slate-400">{v.address || '—'}</td>
+                                                        <td className="p-3 text-slate-300">
+                                                            {Array.isArray(v.packages) && v.packages.length > 0
+                                                                ? v.packages.map((p, idx) => (
+                                                                    <div key={p.id || idx}>{p.name || 'Package'}{p.price != null && p.price !== '' ? ` — LKR ${Number(p.price).toLocaleString()}` : ''}</div>
+                                                                ))
+                                                                : '—'}
+                                                        </td>
+                                                        <td className="p-3">
+                                                            <span className={`inline-flex px-2.5 py-1 rounded-full border text-[10px] font-black uppercase ${accountStatusClass(v.status || 'Active')}`}>{v.status || 'Active'}</span>
+                                                        </td>
+                                                        <td className="p-3 text-slate-400">{v.created_at ? String(v.created_at).replace('T', ' ').slice(0, 16) : '—'}</td>
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                )}
+                            </section>
+                        );
+                    })}
+                </div>
+            )}
+
+            {view === 'companies' && (
             <div className="overflow-x-auto rounded-[28px] border border-slate-800 bg-slate-900/70">
                 <table className="w-full text-left text-sm">
                     <thead className="text-[10px] uppercase tracking-wider text-slate-500 border-b border-slate-800">
@@ -322,6 +503,7 @@ function App() {
                     </tbody>
                 </table>
             </div>
+            )}
 
             <p className="text-xs text-slate-500">
                 Payment reminders are emailed automatically when a subscription expires within 7 days (requires working SMTP in <code className="text-slate-400">.env</code> and server cron: <code className="text-slate-400">php artisan schedule:run</code>).
