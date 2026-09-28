@@ -64,6 +64,8 @@ class RestQueryController extends Controller
         'combo_packages' => ['column' => 'name', 'ascending' => true],
         'payroll_runs' => ['column' => 'period', 'ascending' => false],
         'payroll_slips' => ['column' => 'run_id', 'ascending' => false],
+        'fixed_assets' => ['column' => 'acquisition_date', 'ascending' => true],
+        'bank_clearings' => ['column' => 'cleared_at', 'ascending' => false],
     ];
 
     /** @var list<string> */
@@ -76,7 +78,7 @@ class RestQueryController extends Controller
         'store_items', 'item_recipes', 'store_transactions', 'vendors', 'vendor_categories',
         'vendor_packages', 'accounts_coa', 'journal_entries', 'expense_entries', 'journal_vouchers', 'function_sheets',
         'system_settings', 'production_balancing', 'halls', 'function_types', 'meal_types', 'hall_inclusions', 'menu_extras', 'combo_packages', 'companies',
-        'payroll_runs', 'payroll_slips',
+        'payroll_runs', 'payroll_slips', 'fixed_assets', 'bank_clearings',
     ];
 
     /** @var array<string, list<string>> */

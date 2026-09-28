@@ -29,6 +29,8 @@ class ApiPermissions
         'expense_entries' => ['users'],
         'journal_vouchers' => ['users'],
         'journal_entries' => ['users'],
+        'fixed_assets' => ['users'],
+        'bank_clearings' => ['users'],
         'system_settings' => ['settings'],
         'halls' => ['settings'],
         'function_types' => ['settings'],

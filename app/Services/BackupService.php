@@ -871,7 +871,7 @@ class BackupService
             'kitchen_sheets', 'store_items', 'item_recipes', 'store_transactions', 'vendors',
             'vendor_categories', 'vendor_packages', 'accounts_coa', 'journal_entries', 'expense_entries', 'journal_vouchers',
             'function_sheets', 'system_settings', 'production_balancing', 'halls', 'function_types', 'meal_types', 'hall_inclusions', 'menu_extras',
-            'combo_packages', 'payroll_runs', 'payroll_slips',
+            'combo_packages', 'payroll_runs', 'payroll_slips', 'fixed_assets', 'bank_clearings',
         ];
     }
 
